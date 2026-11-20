@@ -88,3 +88,7 @@ folder, not in the addon folder.
 - **A kill has no final blow on the site:** the killing blow is only known
   when the victim, or someone who hit the victim, has the addon and posts the
   kill. It fills in when they do.
+
+## License
+
+[MIT](LICENSE)
