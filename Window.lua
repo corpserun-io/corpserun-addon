@@ -212,9 +212,10 @@ end
 
 function ns.RefreshWindow()
     if not window or not window:IsShown() then return end
-    local kills, deaths = 0, 0
+    local kills, deaths, exported = 0, 0, 0
     for _, r in ipairs(WKillboardCharDB.reports) do
         if r.kind == "kill" then kills = kills + 1 else deaths = deaths + 1 end
+        if r.exported_at then exported = exported + 1 end
     end
     local pending = ns.PendingCount()
     window.summary:SetText(string.format("%sKills|r %d   %sLosses|r %d   %s%d waiting to export|r",
@@ -231,6 +232,7 @@ function ns.RefreshWindow()
 
     window.exportNew:SetText(pending > 0 and string.format("Export new (%d)", pending) or "Export new")
     window.exportNew:SetEnabled(pending > 0)
+    window.clear:SetEnabled(exported > 0)
     UpdateFilterButtons()
 end
 
@@ -270,6 +272,22 @@ local function CreateWindow()
         f.filters[def[1]] = b
         prev = b
     end
+
+    -- Clear: only removes reports already exported, so nothing unsent is lost.
+    f.clear = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    f.clear:SetSize(70, 22)
+    f.clear:SetPoint("TOPRIGHT", -14, -56)
+    f.clear:SetText("Clear")
+    f.clear:SetScript("OnClick", function() ns.ClearReports(false) end)
+    if f.clear.SetMotionScriptsWhileDisabled then f.clear:SetMotionScriptsWhileDisabled(true) end
+    f.clear:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine("Clear exported")
+        GameTooltip:AddLine("Removes reports you've already exported. Reports waiting to export are kept.", 1, 1, 1, true)
+        GameTooltip:AddLine("/cr clear all deletes everything.", 0.54, 0.56, 0.61, true)
+        GameTooltip:Show()
+    end)
+    f.clear:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     -- List
     local scroll = CreateFrame("ScrollFrame", "CorpseRunWindowScroll", f, "UIPanelScrollFrameTemplate")

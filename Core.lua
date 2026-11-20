@@ -86,6 +86,35 @@ end
 -- /cr clear all asks twice: the second time within 30 seconds deletes.
 local clearAllAt
 
+--- Removes reports already exported (all=true: every report, asking for
+--- confirmation first when some haven't been exported yet).
+--- Used by /cr clear and the window's Clear button.
+function ns.ClearReports(all)
+    local list = WKillboardCharDB.reports
+    if all then
+        local pending = ns.PendingCount()
+        local now = GetTime()
+        if #list > 0 and pending > 0 and not (clearAllAt and now - clearAllAt <= 30) then
+            clearAllAt = now
+            ns.Print("This deletes all %d saved reports, including |cffff5555%d not exported yet|r (they can't be submitted afterwards). Type |cffffffff/cr clear all|r again within 30 seconds to confirm.", #list, pending)
+            return
+        end
+        clearAllAt = nil
+        local n = ns.DropReports(function() return false end)
+        ns.Print("Deleted %d report%s.", n, n == 1 and "" or "s")
+    else
+        local n = ns.DropReports(function(r) return not r.exported_at end)
+        local left = #WKillboardCharDB.reports
+        if n == 0 then
+            ns.Print("Nothing to clear: no exported reports saved.%s", left > 0 and (" %d not exported yet."):format(left) or "")
+        else
+            ns.Print("Removed %d exported report%s.%s", n, n == 1 and "" or "s",
+                left > 0 and (" Kept %d not exported yet."):format(left) or "")
+        end
+    end
+    if ns.OnReportsChanged then pcall(ns.OnReportsChanged) end
+end
+
 -- /cr is short but another addon may claim it; /corpserun always works.
 -- /wkb and /wkillboard are the old names, kept so existing habits still work.
 SLASH_CORPSERUN1 = "/cr"
@@ -121,29 +150,7 @@ SlashCmdList["CORPSERUN"] = function(msg)
     elseif cmd == "export" then
         ns.ShowExport(arg == "all" and "all" or "new")
     elseif cmd == "clear" then
-        local list = WKillboardCharDB.reports
-        if arg == "all" then
-            local pending = ns.PendingCount()
-            local now = GetTime()
-            if #list > 0 and pending > 0 and not (clearAllAt and now - clearAllAt <= 30) then
-                clearAllAt = now
-                ns.Print("This deletes all %d saved reports, including |cffff5555%d not exported yet|r (they can't be submitted afterwards). Type |cffffffff/cr clear all|r again within 30 seconds to confirm.", #list, pending)
-                return
-            end
-            clearAllAt = nil
-            local n = ns.DropReports(function() return false end)
-            ns.Print("Deleted %d report%s.", n, n == 1 and "" or "s")
-        else
-            local n = ns.DropReports(function(r) return not r.exported_at end)
-            local left = #WKillboardCharDB.reports
-            if n == 0 then
-                ns.Print("Nothing to clear: no exported reports saved.%s", left > 0 and (" %d not exported yet."):format(left) or "")
-            else
-                ns.Print("Removed %d exported report%s.%s", n, n == 1 and "" or "s",
-                    left > 0 and (" Kept %d not exported yet."):format(left) or "")
-            end
-        end
-        if ns.OnReportsChanged then pcall(ns.OnReportsChanged) end
+        ns.ClearReports(arg == "all")
     elseif cmd == "test" then
         ns.ShowTestExport()
     elseif cmd == "id" then
