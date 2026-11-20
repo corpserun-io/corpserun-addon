@@ -58,8 +58,33 @@ loader:SetScript("OnEvent", function(self, event, arg1)
         else
             ns.Print("Loaded. Kills and deaths are recorded automatically. |cffffffff/cr|r for options.")
         end
+        ns.CheckDamageMeter()
+    elseif event == "CVAR_UPDATE" then
+        if type(arg1) == "string" and arg1:lower() == "damagemeterenabled" then ns.CheckDamageMeter() end
     end
 end)
+loader:RegisterEvent("CVAR_UPDATE")
+
+-- The game's damage meter gives killmails (final blow, every attacker, damage)
+-- and fight damage. If a player turned it off, say so once per session; never
+-- switch it on for them (that would pop its window up).
+local meterWarned = false
+function ns.DamageMeterOff()
+    if not C_DamageMeter then return false end
+    local get = (C_CVar and C_CVar.GetCVar) or GetCVar
+    if not get then return false end
+    local ok, v = pcall(get, "damageMeterEnabled")
+    return ok and v == "0"
+end
+
+function ns.CheckDamageMeter()
+    if meterWarned or not ns.DamageMeterOff() then return end
+    meterWarned = true
+    ns.Print("The game's damage meter is turned off. CorpseRun reads it for final blows, attackers and damage, so kills record with less detail. Turn it on in the game's Options.")
+end
+
+-- /cr clear all asks twice: the second time within 30 seconds deletes.
+local clearAllAt
 
 -- /cr is short but another addon may claim it; /corpserun always works.
 -- /wkb and /wkillboard are the old names, kept so existing habits still work.
@@ -95,6 +120,30 @@ SlashCmdList["CORPSERUN"] = function(msg)
         end
     elseif cmd == "export" then
         ns.ShowExport(arg == "all" and "all" or "new")
+    elseif cmd == "clear" then
+        local list = WKillboardCharDB.reports
+        if arg == "all" then
+            local pending = ns.PendingCount()
+            local now = GetTime()
+            if #list > 0 and pending > 0 and not (clearAllAt and now - clearAllAt <= 30) then
+                clearAllAt = now
+                ns.Print("This deletes all %d saved reports, including |cffff5555%d not exported yet|r (they can't be submitted afterwards). Type |cffffffff/cr clear all|r again within 30 seconds to confirm.", #list, pending)
+                return
+            end
+            clearAllAt = nil
+            local n = ns.DropReports(function() return false end)
+            ns.Print("Deleted %d report%s.", n, n == 1 and "" or "s")
+        else
+            local n = ns.DropReports(function(r) return not r.exported_at end)
+            local left = #WKillboardCharDB.reports
+            if n == 0 then
+                ns.Print("Nothing to clear: no exported reports saved.%s", left > 0 and (" %d not exported yet."):format(left) or "")
+            else
+                ns.Print("Removed %d exported report%s.%s", n, n == 1 and "" or "s",
+                    left > 0 and (" Kept %d not exported yet."):format(left) or "")
+            end
+        end
+        if ns.OnReportsChanged then pcall(ns.OnReportsChanged) end
     elseif cmd == "test" then
         ns.ShowTestExport()
     elseif cmd == "id" then
@@ -103,6 +152,7 @@ SlashCmdList["CORPSERUN"] = function(msg)
     elseif cmd == "help" then
         ns.Print("/cr - recent kills and losses")
         ns.Print("/cr export [all] - export new (or all) reports to paste on the site")
+        ns.Print("/cr clear - remove reports you've already exported (/cr clear all: everything)")
         ns.Print("/cr key <token> - sign exports with your API token from the site")
         ns.Print("/cr test - export a test kill to check your key (not saved)")
         ns.Print("/cr id - print identity info")

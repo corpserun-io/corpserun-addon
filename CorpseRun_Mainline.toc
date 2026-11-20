@@ -1,4 +1,4 @@
-## Interface: 120000, 120001, 120005, 16001
+## Interface: 120000, 120001, 120005
 ## Title: CorpseRun
 ## Notes: Records your PvP kills and deaths for the CorpseRun killboard. /cr
 ## Author: CorpseRun

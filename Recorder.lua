@@ -81,19 +81,40 @@ local function Store(report)
     report.reporter = ns.PlayerReporter()
     local list = Reports()
     list[#list + 1] = report
-    while #list > MAX_REPORTS do table.remove(list, 1) end
+    local excess = #list - MAX_REPORTS
+    if excess > 0 then
+        local i = 0
+        ns.DropReports(function() i = i + 1; return i > excess end)
+    end
     -- Sign now (when a key is set) so exporting stays instant.
     if ns.SignReports then pcall(ns.SignReports) end
+end
+
+--- Remove the reports `keep` says no to; returns how many went. The newest
+--- dropped signature is remembered (chainTail), so a report signed after the
+--- list empties still points back at it: the site checks the chain.
+function ns.DropReports(keep)
+    local kept, removed, tail = {}, 0, nil
+    for _, r in ipairs(Reports()) do
+        if keep(r) then
+            kept[#kept + 1] = r
+        else
+            removed = removed + 1
+            if r._sig and (not tail or (r.seq or 0) > tail.seq) then
+                tail = { kid = r._sig.kid, s = r._sig.s, seq = r.seq or 0 }
+            end
+        end
+    end
+    local cur = WKillboardCharDB.chainTail
+    if tail and not (cur and (cur.seq or 0) > tail.seq) then WKillboardCharDB.chainTail = tail end
+    WKillboardCharDB.reports = kept
+    return removed
 end
 
 --- Drop reports older than KEEP_DAYS.
 function ns.PruneReports()
     local cutoff = ns.Now() - KEEP_DAYS * 86400
-    local kept = {}
-    for _, r in ipairs(Reports()) do
-        if (r.occurred_at or 0) >= cutoff then kept[#kept + 1] = r end
-    end
-    WKillboardCharDB.reports = kept
+    ns.DropReports(function(r) return (r.occurred_at or 0) >= cutoff end)
 end
 
 -- ---------------------------------------------------------------------------

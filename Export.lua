@@ -60,7 +60,9 @@ end
 function ns.SignReports()
     if not ns.HasKey() then return false end
     local kid, key = WKillboardDB.signKid, nil
-    local prev = ""
+    -- After old reports were cleared, the chain continues from the last one dropped.
+    local tail = WKillboardCharDB.chainTail
+    local prev = (tail and tail.kid == kid and tail.s) or ""
     for _, r in ipairs(WKillboardCharDB.reports) do
         if not (r._sig and r._sig.kid == kid) then
             key = key or ns.FromHex(WKillboardDB.signKey)
