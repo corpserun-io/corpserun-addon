@@ -1,8 +1,9 @@
-## Interface: 16001
+## Interface: 11507, 11508
 ## Title: CorpseRun
 ## Notes: Records your PvP kills and deaths for the CorpseRun killboard. /cr
 ## Author: CorpseRun
-## Version: 0.4.1
+## Version: @project-version@
+## X-Curse-Project-ID: 1818942
 ## SavedVariables: WKillboardDB
 ## SavedVariablesPerCharacter: WKillboardCharDB
 

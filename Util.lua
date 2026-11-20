@@ -1,7 +1,7 @@
 -- CorpseRun: shared helpers (safe calls, printing, JSON, base64).
 local _, ns = ...
 
-ns.VERSION = "0.4.1"
+ns.VERSION = "@project-version@"
 
 function ns.Print(fmt, ...)
     local msg = select("#", ...) > 0 and string.format(fmt, ...) or tostring(fmt)
