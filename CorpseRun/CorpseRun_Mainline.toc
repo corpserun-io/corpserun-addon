@@ -1,0 +1,16 @@
+## Interface: 120000, 120001, 120005, 16001
+## Title: CorpseRun
+## Notes: Records your PvP kills and deaths for the CorpseRun killboard. /cr
+## Author: CorpseRun
+## Version: 0.4.1
+## SavedVariables: WKillboardDB
+## SavedVariablesPerCharacter: WKillboardCharDB
+
+Util.lua
+Sha256.lua
+Identity.lua
+Recorder.lua
+Export.lua
+Debug.lua
+Window.lua
+Core.lua
