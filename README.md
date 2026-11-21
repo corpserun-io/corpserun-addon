@@ -57,9 +57,11 @@ every fight.
 
 | Command | What it does |
 | --- | --- |
-| `/cr` | Opens the window with your recent kills and losses |
+| `/cr` | Opens or closes the window with your recent kills and losses. Click **_** to shrink it to a small bar; it stays open or minimized, where you left it, after a reload |
 | `/cr export` | Export everything you haven't exported yet |
 | `/cr export all` | Export the last 14 days again |
+| `/cr clear` | Remove reports you've already exported (keeps the rest) |
+| `/cr clear all` | Delete every saved report (asks again if some aren't exported yet) |
 | `/cr key <token>` | Set or change your API token |
 | `/cr test` | Export a test kill to check your key (the site doesn't save it) |
 | `/cr debug` | Debug log summary (`/cr debug clear` empties it) |
@@ -88,6 +90,14 @@ folder, not in the addon folder.
 - **A kill has no final blow on the site:** the killing blow is only known
   when the victim, or someone who hit the victim, has the addon and posts the
   kill. It fills in when they do.
+
+## Tests
+
+Plain Lua 5.1 with stubbed WoW APIs, from this folder:
+
+```sh
+docker run --rm -v "$PWD:/addon/CorpseRun:ro" -v "$PWD/tests:/addon/tests:ro" nickblah/lua:5.1 lua /addon/tests/run.lua
+```
 
 ## License
 

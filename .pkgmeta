@@ -2,3 +2,4 @@ package-as: CorpseRun
 
 ignore:
   - README.md
+  - tests
