@@ -62,6 +62,7 @@ every fight.
 | `/cr export all` | Export the last 14 days again |
 | `/cr clear` | Remove reports you've already exported (keeps the rest) |
 | `/cr clear all` | Delete every saved report (asks again if some aren't exported yet) |
+| `/cr minimap` | Hide or show the minimap button (click it to open or close the window, drag it to move it) |
 | `/cr key <token>` | Set or change your API token |
 | `/cr test` | Export a test kill to check your key (the site doesn't save it) |
 | `/cr debug` | Debug log summary (`/cr debug clear` empties it) |

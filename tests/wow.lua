@@ -80,6 +80,7 @@ function T.boot(opts)
     COMBATLOG_HONORGAIN_EXHAUSTION1 = nil
     SlashCmdList = {}
     GameTooltip = newFrame()
+    Minimap = newFrame()
     C_Timer = { After = function(_, fn) fn() end, NewTicker = function() return { Cancel = function() end } end }
     RAID_CLASS_COLORS = setmetatable({}, { __index = function() return { r = 1, g = 1, b = 1 } end })
     CLASS_ICON_TCOORDS = setmetatable({}, { __index = function() return { 0, 1, 0, 1 } end })

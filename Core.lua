@@ -60,6 +60,7 @@ loader:SetScript("OnEvent", function(self, event, arg1)
         end
         ns.CheckDamageMeter()
         ns.RestoreWindow()
+        ns.SetupMinimapButton()
     elseif event == "CVAR_UPDATE" then
         if type(arg1) == "string" and arg1:lower() == "damagemeterenabled" then ns.CheckDamageMeter() end
     end
@@ -154,6 +155,8 @@ SlashCmdList["CORPSERUN"] = function(msg)
         ns.ClearReports(arg == "all")
     elseif cmd == "test" then
         ns.ShowTestExport()
+    elseif cmd == "minimap" then
+        ns.ToggleMinimapButton()
     elseif cmd == "id" then
         WKillboardDB.identity = ns.CollectIdentity()
         PrintIdentity(WKillboardDB.identity)
@@ -163,6 +166,7 @@ SlashCmdList["CORPSERUN"] = function(msg)
         ns.Print("/cr clear - remove reports you've already exported (/cr clear all: everything)")
         ns.Print("/cr key <token> - sign exports with your API token from the site")
         ns.Print("/cr test - export a test kill to check your key (not saved)")
+        ns.Print("/cr minimap - hide or show the minimap button")
         ns.Print("/cr id - print identity info")
         ns.Print("/cr debug [clear] - debug log summary (saved on /reload)")
         ns.Print("/corpserun works the same if another addon took /cr.")

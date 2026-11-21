@@ -15,4 +15,5 @@ Recorder.lua
 Export.lua
 Debug.lua
 Window.lua
+Minimap.lua
 Core.lua

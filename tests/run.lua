@@ -445,6 +445,22 @@ test("window: minimize and open state survive a reload, Escape doesn't close it"
     assert(not CorpseRunWindow and not CorpseRunMini, "closed stays closed")
 end)
 
+test("minimap button: opens/closes the window, /cr minimap hides it across reloads", function()
+    T.boot()
+    local b = CorpseRunMinimapButton
+    assert(b and b:IsShown(), "button shown by default")
+    b.scripts.OnClick(b, "LeftButton")
+    assert(CorpseRunWindow and CorpseRunWindow:IsShown(), "click opens the window")
+    b.scripts.OnClick(b, "LeftButton")
+    assert(not CorpseRunWindow:IsShown(), "click again closes it")
+    SlashCmdList.CORPSERUN("minimap")
+    assert(not b:IsShown() and WKillboardDB.minimap.hide, "/cr minimap hides it")
+    T.boot({ saved = { db = WKillboardDB, char = WKillboardCharDB } })
+    assert(CorpseRunMinimapButton and not CorpseRunMinimapButton:IsShown(), "stays hidden after reload")
+    SlashCmdList.CORPSERUN("minimap")
+    assert(CorpseRunMinimapButton:IsShown(), "/cr minimap shows it again")
+end)
+
 -- ---------------------------------------------------------------------------
 
 for _, t in ipairs(tests) do
