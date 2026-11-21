@@ -59,6 +59,7 @@ loader:SetScript("OnEvent", function(self, event, arg1)
             ns.Print("Loaded. Kills and deaths are recorded automatically. |cffffffff/cr|r for options.")
         end
         ns.CheckDamageMeter()
+        ns.RestoreWindow()
     elseif event == "CVAR_UPDATE" then
         if type(arg1) == "string" and arg1:lower() == "damagemeterenabled" then ns.CheckDamageMeter() end
     end

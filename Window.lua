@@ -1,5 +1,7 @@
 -- CorpseRun: main window (/cr). A scrolling log of recent kills and losses
--- with filters, hover details and the export buttons.
+-- with filters, hover details and the export buttons. It can be minimized to
+-- a small bar, and whether it was open, minimized or closed (plus where it
+-- was) is saved, so it comes back the same way after a reload or login.
 local _, ns = ...
 
 local WIDTH, HEIGHT = 440, 420
@@ -11,7 +13,9 @@ local GOLD = "|cffF2C14E"
 local DIM = "|cff8A909C"
 local CLASS_ICONS = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes"
 
-local window
+local MINI_W, MINI_H = 200, 26
+
+local window, mini
 local filter = "all"               -- all | kill | death
 local rows = {}
 
@@ -210,7 +214,16 @@ local function UpdateFilterButtons()
     end
 end
 
+local function RefreshMini()
+    if not mini or not mini:IsShown() then return end
+    local pending = ns.PendingCount()
+    mini.label:SetText("Corpse" .. GOLD .. "Run|r  " .. (pending > 0
+        and string.format("%s%d waiting to export|r", GOLD, pending)
+        or DIM .. "nothing to export|r"))
+end
+
 function ns.RefreshWindow()
+    RefreshMini()
     if not window or not window:IsShown() then return end
     local kills, deaths, exported = 0, 0, 0
     for _, r in ipairs(WKillboardCharDB.reports) do
@@ -238,17 +251,140 @@ end
 
 ns.OnReportsChanged = ns.RefreshWindow
 
-local function CreateWindow()
-    local f = CreateFrame("Frame", "CorpseRunWindow", UIParent, "BasicFrameTemplateWithInset")
-    f:SetSize(WIDTH, HEIGHT)
-    f:SetPoint("CENTER")
+-- ---------------------------------------------------------------------------
+-- Saved state: "open", "min" or "closed", and the top-left corner shared by
+-- the window and the mini bar (so minimizing keeps it in place).
+-- ---------------------------------------------------------------------------
+
+local function Saved()
+    WKillboardDB.window = type(WKillboardDB.window) == "table" and WKillboardDB.window or {}
+    return WKillboardDB.window
+end
+
+--- Remember where a frame's top-left corner is (after a drag).
+local function SavePosition(f)
+    local left, top = f:GetLeft(), f:GetTop()
+    if left and top then
+        local s = Saved()
+        s.x, s.y = math.floor(left + 0.5), math.floor(top + 0.5)
+    end
+end
+
+--- Put a frame at the saved top-left corner, or its default spot.
+local function PlaceFrame(f, defaultPoint)
+    local s = Saved()
+    f:ClearAllPoints()
+    if type(s.x) == "number" and type(s.y) == "number" then
+        f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", s.x, s.y)
+    else
+        f:SetPoint(defaultPoint)
+    end
+end
+
+local function Draggable(f)
     f:SetMovable(true)
     f:SetClampedToScreen(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", f.StartMoving)
-    f:SetScript("OnDragStop", f.StopMovingOrSizing)
-    tinsert(UISpecialFrames, "CorpseRunWindow")
+    f:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        -- We save the spot ourselves; keep the client's layout cache out of it.
+        if self.SetUserPlaced then self:SetUserPlaced(false) end
+        SavePosition(self)
+    end)
+end
+
+local CreateWindow, CreateMini
+
+--- Show the window as "open", "min" or "closed" and remember it.
+local function SetState(state)
+    Saved().state = state
+    if state == "open" then
+        window = window or CreateWindow()
+        if mini and mini:IsShown() then SavePosition(mini); mini:Hide() end
+        PlaceFrame(window, "CENTER")
+        window:Show()
+    elseif state == "min" then
+        mini = mini or CreateMini()
+        if window and window:IsShown() then SavePosition(window); window:Hide() end
+        PlaceFrame(mini, "CENTER")
+        mini:Show()
+        RefreshMini()
+    else
+        if window and window:IsShown() then SavePosition(window) end
+        if mini and mini:IsShown() then SavePosition(mini) end
+        if window then window:Hide() end
+        if mini then mini:Hide() end
+    end
+end
+
+function CreateMini()
+    local f = CreateFrame("Button", "CorpseRunMini", UIParent)
+    f:SetSize(MINI_W, MINI_H)
+    f:SetFrameStrata("MEDIUM")
+    Draggable(f)
+    f:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+    local bg = f:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    SetSolid(bg, 0.05, 0.06, 0.08, 0.92)
+    -- 1px border
+    for _, side in ipairs({ { "TOPLEFT", "TOPRIGHT", nil, 1 }, { "BOTTOMLEFT", "BOTTOMRIGHT", nil, 1 },
+                            { "TOPLEFT", "BOTTOMLEFT", 1, nil }, { "TOPRIGHT", "BOTTOMRIGHT", 1, nil } }) do
+        local t = f:CreateTexture(nil, "BORDER")
+        t:SetPoint(side[1]); t:SetPoint(side[2])
+        if side[3] then t:SetWidth(side[3]) else t:SetHeight(side[4]) end
+        SetSolid(t, 0.35, 0.37, 0.42, 0.9)
+    end
+    f:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+
+    f.label = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    f.label:SetPoint("LEFT", 8, 0)
+    f.label:SetPoint("RIGHT", -8, 0)
+    f.label:SetJustifyH("LEFT")
+
+    f:SetScript("OnClick", function(_, button)
+        if button == "RightButton" then SetState("closed") else SetState("open") end
+    end)
+    f:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        GameTooltip:AddLine("Corpse" .. GOLD .. "Run|r")
+        GameTooltip:AddLine("Click to open. Drag to move. Right-click to close.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    f:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    f:Hide()
+    return f
+end
+
+function CreateWindow()
+    local f = CreateFrame("Frame", "CorpseRunWindow", UIParent, "BasicFrameTemplateWithInset")
+    f:SetSize(WIDTH, HEIGHT)
+    f:SetPoint("CENTER")
+    Draggable(f)
+    -- Not in UISpecialFrames: Escape (closing bags, the map...) leaves it open.
+
+    -- The template's X closes it for good; the new button minimizes it.
+    local closeButton = f.CloseButton or _G["CorpseRunWindowCloseButton"]
+    if type(closeButton) ~= "table" then closeButton = nil end
+    if closeButton then closeButton:SetScript("OnClick", function() SetState("closed") end) end
+    f.minimize = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    f.minimize:SetSize(22, 18)
+    if closeButton then
+        f.minimize:SetPoint("RIGHT", closeButton, "LEFT", -2, 0)
+    else
+        f.minimize:SetPoint("TOPRIGHT", -28, -3)
+    end
+    f.minimize:SetText("_")
+    f.minimize:SetScript("OnClick", function() SetState("min") end)
+    f.minimize:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine("Minimize")
+        GameTooltip:AddLine("Shrinks to a small bar. It stays after a reload.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    f.minimize:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     f.title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     f.title:SetPoint("TOP", 0, -5)
@@ -333,7 +469,13 @@ local function CreateWindow()
     return f
 end
 
+--- /cr: open it (from closed or minimized), or close it when it's open.
 function ns.ToggleWindow()
-    window = window or CreateWindow()
-    window:SetShown(not window:IsShown())
+    SetState(Saved().state == "open" and window and window:IsShown() and "closed" or "open")
+end
+
+--- After login or a reload: bring the window back the way it was left.
+function ns.RestoreWindow()
+    local state = Saved().state
+    if state == "open" or state == "min" then SetState(state) end
 end
