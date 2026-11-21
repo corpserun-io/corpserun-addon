@@ -13,7 +13,7 @@ local GOLD = "|cffF2C14E"
 local DIM = "|cff8A909C"
 local CLASS_ICONS = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes"
 
-local MINI_W, MINI_H = WIDTH, 26  -- same width as the window, so minimizing keeps its footprint
+local MINI_W, MINI_H = WIDTH, 24  -- same width as the window; height = its title bar (measured)
 
 local window, mini
 local filter = "all"               -- all | kill | death
@@ -217,9 +217,9 @@ end
 local function RefreshMini()
     if not mini or not mini:IsShown() then return end
     local pending = ns.PendingCount()
-    mini.label:SetText("Corpse" .. GOLD .. "Run|r  " .. (pending > 0
+    mini.label:SetText(pending > 0
         and string.format("%s%d waiting to export|r", GOLD, pending)
-        or DIM .. "nothing to export|r"))
+        or DIM .. "nothing to export|r")
 end
 
 function ns.RefreshWindow()
@@ -319,30 +319,84 @@ local function SetState(state)
     end
 end
 
+--- The X (top left, closes) and the "-"/"+" button (top right) for the
+--- window and the minimized bar. Both use the same frame template, so the
+--- buttons land in exactly the same spots on each.
+local function TitleButtons(f, name, text, state, tipTitle, tipText)
+    local close = f.CloseButton or _G[name .. "CloseButton"]
+    if type(close) ~= "table" then close = nil end
+    if close then close:SetScript("OnClick", function() SetState("closed") end) end
+    local MIN_W, MIN_H = 22, 18
+    local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    b:SetSize(MIN_W, MIN_H)
+    local point, rel, relPoint, x, y, cw, ch
+    if close then
+        point, rel, relPoint, x, y = close:GetPoint(1)
+        cw, ch = close:GetSize()
+    end
+    -- Centred where the template's X was.
+    local mx, my = -4, -3
+    if point == "TOPRIGHT" and relPoint == "TOPRIGHT" and cw and ch then
+        mx = (x or 0) - math.floor((cw - MIN_W) / 2)
+        my = (y or 0) - math.floor((ch - MIN_H) / 2)
+    end
+    -- Nudged to sit centred in the template's corner box (the X art it
+    -- replaces isn't quite centred in its own button). Half pixels: the UI
+    -- is usually scaled, so whole steps over- or undershoot.
+    b:SetPoint("TOPRIGHT", f, "TOPRIGHT", mx + 3, my + 0.5)
+    if close then
+        close:SetSize(MIN_H, MIN_H) -- square, so the X art isn't stretched
+        close:ClearAllPoints()
+        -- same distance from the left edge as the "-"/"+" from the right
+        close:SetPoint("TOPLEFT", f, "TOPLEFT", -mx + math.floor((MIN_W - MIN_H) / 2), my)
+    end
+    b:SetText(text)
+    b:SetScript("OnClick", function() SetState(state) end)
+    b:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:AddLine(tipTitle)
+        if tipText then GameTooltip:AddLine(tipText, 1, 1, 1, true) end
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return b
+end
+
 function CreateMini()
+    -- The window's own frame with everything below the title bar cut off: a
+    -- holder that clips its children, with the same template inside at the
+    -- window's width. Same template, width and top-left corner as the window,
+    -- so it looks like its top and the buttons don't move when switching.
     local f = CreateFrame("Button", "CorpseRunMini", UIParent)
     f:SetSize(MINI_W, MINI_H)
     f:SetFrameStrata("MEDIUM")
     Draggable(f)
     f:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    if f.SetClipsChildren then f:SetClipsChildren(true) end
 
-    local bg = f:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    SetSolid(bg, 0.05, 0.06, 0.08, 0.92)
-    -- 1px border
-    for _, side in ipairs({ { "TOPLEFT", "TOPRIGHT", nil, 1 }, { "BOTTOMLEFT", "BOTTOMRIGHT", nil, 1 },
-                            { "TOPLEFT", "BOTTOMLEFT", 1, nil }, { "TOPRIGHT", "BOTTOMRIGHT", 1, nil } }) do
-        local t = f:CreateTexture(nil, "BORDER")
-        t:SetPoint(side[1]); t:SetPoint(side[2])
-        if side[3] then t:SetWidth(side[3]) else t:SetHeight(side[4]) end
-        SetSolid(t, 0.35, 0.37, 0.42, 0.9)
+    local frame = CreateFrame("Frame", "CorpseRunMiniFrame", f, "BasicFrameTemplate")
+    frame:SetSize(WIDTH, 120)
+    frame:SetPoint("TOPLEFT")
+    frame:EnableMouse(false) -- clicks and drags go to the holder
+    f.frame = frame
+
+    -- Cut just under the title bar's bottom edge line.
+    local tb = frame.TitleBg or _G["CorpseRunMiniFrameTitleBg"]
+    if type(tb) == "table" and tb.GetHeight then
+        local th = tb:GetHeight()
+        local _, _, _, _, ty = tb:GetPoint(1)
+        if type(th) == "number" and th > 0 then f:SetHeight(math.floor(th - (ty or 0) + 3 + 0.5)) end
     end
-    f:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
 
-    f.label = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    f.label:SetPoint("LEFT", 8, 0)
-    f.label:SetPoint("RIGHT", -8, 0)
-    f.label:SetJustifyH("LEFT")
+    frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    frame.title:SetPoint("TOP", 0, -5)
+    frame.title:SetText("Corpse" .. GOLD .. "Run|r")
+
+    f.expand = TitleButtons(frame, "CorpseRunMiniFrame", "+", "open", "Open")
+
+    f.label = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    f.label:SetPoint("RIGHT", f.expand, "LEFT", -6, 0)
+    f.label:SetJustifyH("RIGHT")
 
     f:SetScript("OnClick", function(_, button)
         if button == "RightButton" then SetState("closed") else SetState("open") end
@@ -365,41 +419,8 @@ function CreateWindow()
     Draggable(f)
     -- Not in UISpecialFrames: Escape (closing bags, the map...) leaves it open.
 
-    -- The template's X closes it for good; the new button minimizes it.
-    local closeButton = f.CloseButton or _G["CorpseRunWindowCloseButton"]
-    if type(closeButton) ~= "table" then closeButton = nil end
-    if closeButton then closeButton:SetScript("OnClick", function() SetState("closed") end) end
-    -- Minimize in the top-right corner (centred where the template's X was),
-    -- the X mirrored into the top-left corner at the same small size.
-    local MIN_W, MIN_H = 22, 18
-    f.minimize = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    f.minimize:SetSize(MIN_W, MIN_H)
-    local point, rel, relPoint, x, y, cw, ch
-    if closeButton then
-        point, rel, relPoint, x, y = closeButton:GetPoint(1)
-        cw, ch = closeButton:GetSize()
-    end
-    local mx, my = -4, -3
-    if point == "TOPRIGHT" and relPoint == "TOPRIGHT" and cw and ch then
-        mx = (x or 0) - math.floor((cw - MIN_W) / 2)
-        my = (y or 0) - math.floor((ch - MIN_H) / 2)
-    end
-    f.minimize:SetPoint("TOPRIGHT", f, "TOPRIGHT", mx, my)
-    if closeButton then
-        closeButton:SetSize(MIN_H, MIN_H) -- square, so the X art isn't stretched
-        closeButton:ClearAllPoints()
-        -- same distance from the left edge (centre to edge) as the minimize from the right
-        closeButton:SetPoint("TOPLEFT", f, "TOPLEFT", -mx + math.floor((MIN_W - MIN_H) / 2), my)
-    end
-    f.minimize:SetText("_")
-    f.minimize:SetScript("OnClick", function() SetState("min") end)
-    f.minimize:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_TOP")
-        GameTooltip:AddLine("Minimize")
-        GameTooltip:AddLine("Shrinks to a small bar. It stays after a reload.", 1, 1, 1, true)
-        GameTooltip:Show()
-    end)
-    f.minimize:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    f.minimize = TitleButtons(f, "CorpseRunWindow", "-", "min", "Minimize",
+        "Shrinks to its title bar. It stays after a reload.")
 
     f.title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     f.title:SetPoint("TOP", 0, -5)
