@@ -1,6 +1,7 @@
 ## Interface: 11507, 11508
 ## Title: CorpseRun
 ## Notes: Records your PvP kills and deaths for the CorpseRun killboard. /cr
+## IconTexture: Interface\AddOns\CorpseRun\icon
 ## Author: CorpseRun
 ## Version: @project-version@
 ## X-Curse-Project-ID: 1818942
