@@ -13,7 +13,7 @@ local GOLD = "|cffF2C14E"
 local DIM = "|cff8A909C"
 local CLASS_ICONS = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes"
 
-local MINI_W, MINI_H = 200, 26
+local MINI_W, MINI_H = WIDTH, 26  -- same width as the window, so minimizing keeps its footprint
 
 local window, mini
 local filter = "all"               -- all | kill | death
@@ -369,12 +369,27 @@ function CreateWindow()
     local closeButton = f.CloseButton or _G["CorpseRunWindowCloseButton"]
     if type(closeButton) ~= "table" then closeButton = nil end
     if closeButton then closeButton:SetScript("OnClick", function() SetState("closed") end) end
+    -- Minimize in the top-right corner (centred where the template's X was),
+    -- the X mirrored into the top-left corner at the same small size.
+    local MIN_W, MIN_H = 22, 18
     f.minimize = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    f.minimize:SetSize(22, 18)
+    f.minimize:SetSize(MIN_W, MIN_H)
+    local point, rel, relPoint, x, y, cw, ch
     if closeButton then
-        f.minimize:SetPoint("RIGHT", closeButton, "LEFT", -2, 0)
-    else
-        f.minimize:SetPoint("TOPRIGHT", -28, -3)
+        point, rel, relPoint, x, y = closeButton:GetPoint(1)
+        cw, ch = closeButton:GetSize()
+    end
+    local mx, my = -4, -3
+    if point == "TOPRIGHT" and relPoint == "TOPRIGHT" and cw and ch then
+        mx = (x or 0) - math.floor((cw - MIN_W) / 2)
+        my = (y or 0) - math.floor((ch - MIN_H) / 2)
+    end
+    f.minimize:SetPoint("TOPRIGHT", f, "TOPRIGHT", mx, my)
+    if closeButton then
+        closeButton:SetSize(MIN_H, MIN_H) -- square, so the X art isn't stretched
+        closeButton:ClearAllPoints()
+        -- same distance from the left edge (centre to edge) as the minimize from the right
+        closeButton:SetPoint("TOPLEFT", f, "TOPLEFT", -mx + math.floor((MIN_W - MIN_H) / 2), my)
     end
     f.minimize:SetText("_")
     f.minimize:SetScript("OnClick", function() SetState("min") end)
