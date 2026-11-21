@@ -322,6 +322,58 @@ end
 --- The X (top left, closes) and the "-"/"+" button (top right) for the
 --- window and the minimized bar. Both use the same frame template, so the
 --- buttons land in exactly the same spots on each.
+--- The box the title-bar buttons sit in, taken from one source so it's the
+--- same on the window and the minimized bar: the top-right corner art of a
+--- hidden copy of the window's template. Returns the art and where in it the
+--- box is, or nil.
+local boxArt
+local function BoxArt()
+    if boxArt ~= nil then return boxArt or nil end
+    boxArt = false
+    local ok, src = pcall(CreateFrame, "Frame", "CorpseRunBoxSource", UIParent, "BasicFrameTemplateWithInset")
+    if not ok or type(src) ~= "table" then return nil end
+    src:Hide()
+    local tr = src.TopRightCorner or _G["CorpseRunBoxSourceTopRightCorner"]
+    local close = src.CloseButton or _G["CorpseRunBoxSourceCloseButton"]
+    if type(tr) ~= "table" or not tr.GetTexCoord or type(close) ~= "table" then return nil end
+    local tw, th = tr:GetSize()
+    local _, _, _, rx, ry = tr:GetPoint(1)
+    local ulx, uly, llx, lly, urx = tr:GetTexCoord()
+    local _, _, _, x, y = close:GetPoint(1)
+    local cw, ch = close:GetSize()
+    if not (tw and th and tw > 0 and th > 0 and urx and lly and cw and ch) then return nil end
+    local boxC = 8 - ((x or 0) - math.floor((cw - 22) / 2)) -- box centre, in from the right edge
+    local px0 = tw - (boxC + (rx or 0)) - cw / 2            -- box left, in texture pixels
+    local py0 = (ry or 0) - (y or 0)                        -- box top, in texture pixels
+    local function u(px) return ulx + (urx - ulx) * math.max(0, math.min(1, px / tw)) end
+    local function v(py) return uly + (lly - uly) * math.max(0, math.min(1, py / th)) end
+    boxArt = {
+        atlas = tr.GetAtlas and tr:GetAtlas(), file = tr:GetTexture(),
+        l = u(px0), r = u(px0 + cw), t = v(py0), b = v(py0 + ch), w = cw, h = ch,
+    }
+    return boxArt
+end
+
+--- Boxes behind the X (left, flipped) and the "-"/"+" (right). Both buttons
+--- are centred 8 - mx in from their edge, so the boxes land centred on them.
+local function Boxes(f, mx, y)
+    local art = BoxArt()
+    if not art or not y then return end
+    local inset = (8 - mx) - art.w / 2
+    for _, side in ipairs({ "LEFT", "RIGHT" }) do
+        local t = f:CreateTexture(nil, "OVERLAY")
+        if art.atlas and art.atlas ~= "" then t:SetAtlas(art.atlas) else t:SetTexture(art.file) end
+        t:SetSize(art.w, art.h)
+        if side == "LEFT" then
+            t:SetTexCoord(art.r, art.l, art.t, art.b) -- flipped left/right
+            t:SetPoint("TOPLEFT", f, "TOPLEFT", inset, y)
+        else
+            t:SetTexCoord(art.l, art.r, art.t, art.b)
+            t:SetPoint("TOPRIGHT", f, "TOPRIGHT", -inset, y)
+        end
+    end
+end
+
 local function TitleButtons(f, name, text, state, tipTitle, tipText)
     local close = f.CloseButton or _G[name .. "CloseButton"]
     if type(close) ~= "table" then close = nil end
@@ -348,7 +400,8 @@ local function TitleButtons(f, name, text, state, tipTitle, tipText)
         close:SetSize(MIN_H, MIN_H) -- square, so the X art isn't stretched
         close:ClearAllPoints()
         -- same distance from the left edge as the "-"/"+" from the right
-        close:SetPoint("TOPLEFT", f, "TOPLEFT", -mx + math.floor((MIN_W - MIN_H) / 2), my)
+        close:SetPoint("TOPLEFT", f, "TOPLEFT", -mx + math.floor((MIN_W - MIN_H) / 2) - 3, my)
+        Boxes(f, mx, y)
     end
     b:SetText(text)
     b:SetScript("OnClick", function() SetState(state) end)
@@ -374,7 +427,7 @@ function CreateMini()
     f:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     if f.SetClipsChildren then f:SetClipsChildren(true) end
 
-    local frame = CreateFrame("Frame", "CorpseRunMiniFrame", f, "BasicFrameTemplate")
+    local frame = CreateFrame("Frame", "CorpseRunMiniFrame", f, "BasicFrameTemplateWithInset")
     frame:SetSize(WIDTH, 120)
     frame:SetPoint("TOPLEFT")
     frame:EnableMouse(false) -- clicks and drags go to the holder
