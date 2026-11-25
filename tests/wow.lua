@@ -93,7 +93,12 @@ function T.boot(opts)
     CLASS_ICON_TCOORDS = setmetatable({}, { __index = function() return { 0, 1, 0, 1 } end })
     local function base(u) return (u:gsub("target$", "")) end
     UnitExists = function(u) if u:match(".target$") then local b = units[base(u)]; return b and b.targeting ~= nil end return units[u] ~= nil end
-    UnitIsPlayer = function(u) return units[u] ~= nil end
+    -- "<unit>target" is the unit named by that unit's `targeting` (a unit token).
+    local function R(u)
+        if u:match(".target$") then local b = units[base(u)]; return b and b.targeting and units[b.targeting] end
+        return units[u]
+    end
+    UnitIsPlayer = function(u) return R(u) ~= nil end
     UnitName = function(u) local x = units[u]; if x then return x.name, x.second end end
     UnitFullName = function(u) local x = units[u]; if x then return x.name, x.second end end
     UnitClass = function(u) local x = units[u]; if x and x.class then return x.class[1], x.class[2] end end
@@ -102,8 +107,9 @@ function T.boot(opts)
     UnitSex = function(u) return units[u] and units[u].sex end
     UnitFactionGroup = function(u) return units[u] and units[u].faction end
     GetGuildInfo = function(u) return units[u] and units[u].guild end
-    UnitGUID = function(u) return units[u] and units[u].guid end
-    UnitIsEnemy = function(_, b) return units[b] and units[b].enemy end
+    UnitGUID = function(u) local x = R(u); return x and x.guid end
+    UnitIsEnemy = function(_, b) local x = R(b); return x and x.enemy end
+    UnitIsFriend = function(_, b) local x = R(b); return x ~= nil and not x.enemy end
     UnitIsUnit = function(a, b)
         if a:match(".target$") then local s = units[base(a)]; return s and s.targeting == b end
         return a == b

@@ -28,6 +28,14 @@ Anniversary, Progression Classic and Retail, in battlegrounds and world PvP.
 4. Start WoW. On the character screen click **AddOns** (bottom left) and make
    sure **CorpseRun** is ticked.
 5. Log in. You'll see `[CorpseRun] Loaded…` in chat.
+6. Make sure these game settings are on (CorpseRun tells you at login if one
+   isn't, and `/cr check` lists them):
+
+   | Setting | What CorpseRun reads from it |
+   | --- | --- |
+   | Damage meter | Final blows, attackers and everyone's damage |
+   | Enemy nameplates (key `V`) | Who attacked you, and which enemy died |
+   | Friendly nameplates | Players outside your group who helped on a kill |
 
 ## Set up exports (once)
 
@@ -62,6 +70,7 @@ every fight.
 | `/cr export all` | Export the last 14 days again |
 | `/cr clear` | Remove reports you've already exported (keeps the rest) |
 | `/cr clear all` | Delete every saved report (asks again if some aren't exported yet) |
+| `/cr check` | Whether the game settings CorpseRun reads from (damage meter, enemy and friendly nameplates) are on |
 | `/cr minimap` | Hide or show the minimap button (click it to open or close the window, drag it to move it) |
 | `/cr key <token>` | Set or change your API token |
 | `/cr test` | Export a test kill to check your key (the site doesn't save it) |
@@ -88,6 +97,8 @@ folder, not in the addon folder.
 - **"Nothing new to export":** everything has already been exported. Use
   `/cr export all` to export the last 14 days again; the site ignores
   duplicates.
+- **Kills are missing attackers or damage:** run `/cr check` and turn on
+  anything listed as off.
 - **A kill has no final blow on the site:** the killing blow is only known
   when the victim, or someone who hit the victim, has the addon and posts the
   kill. It fills in when they do.

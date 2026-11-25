@@ -60,31 +60,92 @@ loader:SetScript("OnEvent", function(self, event, arg1)
         else
             ns.Print("Loaded. Kills and deaths are recorded automatically. |cffffffff/cr|r for options.")
         end
-        ns.CheckDamageMeter()
+        ns.CheckSettings(true)
         ns.RestoreWindow()
         ns.SetupMinimapButton()
     elseif event == "CVAR_UPDATE" then
-        if type(arg1) == "string" and arg1:lower() == "damagemeterenabled" then ns.CheckDamageMeter() end
+        local name = type(arg1) == "string" and arg1:lower() or ""
+        if name == "damagemeterenabled" or name == "nameplateshowenemies" or name == "nameplateshowfriends"
+            or name == "nameplateshowfriendlyplayers" then
+            ns.CheckSettings(false)
+        end
     end
 end)
 loader:RegisterEvent("CVAR_UPDATE")
 
--- The game's damage meter gives killmails (final blow, every attacker, damage)
--- and fight damage. If a player turned it off, say so once per session; never
--- switch it on for them (that would pop its window up).
-local meterWarned = false
-function ns.DamageMeterOff()
-    if not C_DamageMeter then return false end
+-- Game settings CorpseRun reads from. If a player turned one off, say so: all
+-- of them in one message at login, then again only when one is switched off.
+-- Never switch them on for the player (the meter would pop its window up).
+local SETTINGS = {
+    { cvar = "damageMeterEnabled", name = "the damage meter", why = "final blows, attackers and damage" },
+    { cvar = "nameplateShowEnemies", name = "enemy nameplates", why = "who attacked you and which enemy died", key = "V" },
+    -- Forever (modern engine) has nameplateShowFriendlyPlayers; older clients nameplateShowFriends.
+    { cvar = "nameplateShowFriends", also = "nameplateShowFriendlyPlayers", name = "friendly nameplates",
+      why = "players outside your group who helped on a kill" },
+}
+
+local function CVar(name)
     local get = (C_CVar and C_CVar.GetCVar) or GetCVar
-    if not get then return false end
-    local ok, v = pcall(get, "damageMeterEnabled")
-    return ok and v == "0"
+    if not get then return nil end
+    local ok, v = pcall(get, name)
+    return ok and v or nil
 end
 
-function ns.CheckDamageMeter()
-    if meterWarned or not ns.DamageMeterOff() then return end
-    meterWarned = true
-    ns.Print("The game's damage meter is turned off. CorpseRun reads it for final blows, attackers and damage, so kills record with less detail. Turn it on in the game's Options.")
+local function CVarOff(name)
+    return CVar(name) == "0"                  -- unknown setting / no value: assume on
+end
+
+function ns.DamageMeterOff()
+    if not C_DamageMeter then return false end
+    return CVarOff("damageMeterEnabled")
+end
+
+local function SettingOff(s)
+    if s.cvar == "damageMeterEnabled" then return ns.DamageMeterOff() end
+    -- Off only when no version of it is on (a client may have just one of them).
+    if s.also and CVar(s.also) == "1" then return false end
+    if s.also and CVar(s.cvar) == nil then return CVarOff(s.also) end
+    return CVarOff(s.cvar)
+end
+
+local function Describe(s)
+    return string.format("|cffffffff%s|r (%s%s)", s.name, s.why, s.key and (", key " .. s.key) or "")
+end
+
+local lastOff = {}                            -- [cvar] = was off at the last check
+local warnedAny = false
+
+--- Prints which settings are off. login: everything that's off (once per
+--- session); otherwise only settings switched off since the last check, and
+--- a thank-you once everything warned about is back on.
+function ns.CheckSettings(login)
+    local off, newlyOff = {}, {}
+    for _, s in ipairs(SETTINGS) do
+        local isOff = SettingOff(s)
+        if isOff then off[#off + 1] = s end
+        if isOff and not lastOff[s.cvar] then newlyOff[#newlyOff + 1] = s end
+        lastOff[s.cvar] = isOff
+    end
+    local list = login and off or newlyOff
+    if #list > 0 then
+        local parts = {}
+        for i, s in ipairs(list) do parts[i] = Describe(s) end
+        ns.Print("Turned off: %s. CorpseRun reads %s to record kills fully. Turn %s on in the game's Options.",
+            table.concat(parts, "; "), #list == 1 and "it" or "them", #list == 1 and "it" or "them")
+        warnedAny = true
+    elseif warnedAny and #off == 0 and not login then
+        warnedAny = false
+        ns.Print("Thanks: the damage meter and nameplates are all on.")
+    end
+    return off
+end
+ns.CheckDamageMeter = function() ns.CheckSettings(true) end
+
+--- /cr check: every setting and whether it's on.
+function ns.SettingsStatus()
+    for _, s in ipairs(SETTINGS) do
+        ns.Print("%s %s: %s", SettingOff(s) and "|cffff5555off|r" or "|cff4ade80on|r", s.name, s.why)
+    end
 end
 
 -- /cr clear all asks twice: the second time within 30 seconds deletes.
@@ -170,6 +231,8 @@ SlashCmdList["CORPSERUN"] = function(msg)
         else
             ns.Print("Nothing to backfill: no exported group kill is missing damage that the debug log has.")
         end
+    elseif cmd == "check" then
+        ns.SettingsStatus()
     elseif cmd == "minimap" then
         ns.ToggleMinimapButton()
     elseif cmd == "id" then
@@ -182,6 +245,7 @@ SlashCmdList["CORPSERUN"] = function(msg)
         ns.Print("/cr key <token> - sign exports with your API token from the site")
         ns.Print("/cr test - export a test kill to check your key (not saved)")
         ns.Print("/cr backfill - send your group's damage for exported kills that went out without it (from the debug log)")
+        ns.Print("/cr check - game settings CorpseRun needs (damage meter, nameplates)")
         ns.Print("/cr minimap - hide or show the minimap button")
         ns.Print("/cr id - print identity info")
         ns.Print("/cr debug [on/off/clear] - debug mode (off by default) and its log summary")

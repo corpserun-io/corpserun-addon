@@ -349,6 +349,46 @@ test("open-world party kill: the meter's breakdown gives each member's damage af
     assert(ns.SignedJSON(r):find('"damage":950', 1, true), "signed again with the attackers")
 end)
 
+test("open-world kill: players outside our group fighting the victim are listed (no damage), kept after the meter", function()
+    T.boot()
+    Party()
+    local victim = T.enemy("Swinton", "Lightsblade", { guid = "Player-6926-004BFD85" })
+    T.units.target = victim
+    -- Terra (not in our group) is fighting it; Idle is around but not in combat; a
+    -- friendly player on someone else isn't counted either.
+    T.units.nameplate2 = { name = "Terra", second = "Hux", class = { "Druid", "DRUID" }, race = "Tauren", level = 35,
+                           faction = "Horde", guid = "Player-1-0010", inCombat = true, targeting = "target" }
+    T.units.nameplate3 = { name = "Idle", class = { "Mage", "MAGE" }, race = "Troll", faction = "Horde",
+                           guid = "Player-1-0011", targeting = "target" }
+    T.units.nameplate4 = { name = "Busy", class = { "Rogue", "ROGUE" }, race = "Orc", faction = "Horde",
+                           guid = "Player-1-0012", inCombat = true, targeting = "nameplate2" }
+    for i = 2, 4 do T.fire("NAME_PLATE_UNIT_ADDED", "nameplate" .. i) end
+    T.clock = 100; T.fire("PLAYER_REGEN_DISABLED")
+    victim.dead = true
+    T.clock = 121; T.fire("UNIT_DIED", victim.guid)
+    T.hk = 1; T.fire("PLAYER_PVP_KILLS_CHANGED")
+    local names = {}
+    for _, a in ipairs(T.last().attackers or {}) do names[a.name] = a end
+    assert(names.Thrall and names.Jaina, "group members")
+    assert(names.Terra and names.Terra.damage == nil and names.Terra.surname == "Hux", "helper outside the group")
+    assert(not names.Idle and not names.Busy, "not fighting it")
+    -- The meter's breakdown (our group only) replaces the group guess but keeps Terra.
+    T.meterEnemy = { durationSeconds = 20, combatSources = {
+        { name = "Swinton Lightsblade", sourceGUID = victim.guid, totalAmount = 1500 },
+    } }
+    T.meterVictim[victim.guid] = { maxAmount = 950, totalAmount = 1500, combatSpells = {
+        { spellID = 0, totalAmount = 950, combatSpellDetails = { unitName = "Thrall Doe", amount = 0 } },
+        { spellID = 0, totalAmount = 550, combatSpellDetails = { unitName = "Gorvash", amount = 0 } },
+    } }
+    T.inCombat = false
+    T.clock = 126; T.fire("PLAYER_REGEN_ENABLED")
+    names = {}
+    for _, a in ipairs(T.last().attackers or {}) do names[a.name] = a end
+    assert(names.Thrall and names.Thrall.damage == 950, "meter damage")
+    assert(not names.Jaina, "Jaina did nothing")
+    assert(names.Terra and names.Terra.damage == nil, "helper kept after the meter fill")
+end)
+
 test("/cr backfill: exported group kill without damage gets a follow-up from the debug log's breakdown", function()
     local ns = T.boot()
     SlashCmdList.CORPSERUN("key wkb_" .. string.rep("ab", 32))
@@ -618,17 +658,34 @@ test("/cr clear all asks first when unexported reports would be lost", function(
     assert(#T.reports() == 0 and T.said("Deleted 1 report."), "second time deletes")
 end)
 
-test("damage meter turned off: one warning per session", function()
-    T.boot({ cvars = { damageMeterEnabled = "0" } })
-    local n = 0
-    for _, l in ipairs(T.printed) do if l:find("damage meter is turned off", 1, true) then n = n + 1 end end
-    assert(n == 1, "warned once at login")
+test("settings: damage meter and nameplates off are named at login, again only when switched off", function()
+    local function count(text)
+        local n = 0
+        for _, l in ipairs(T.printed) do if l:find(text, 1, true) then n = n + 1 end end
+        return n
+    end
+    T.boot({ cvars = { damageMeterEnabled = "0", nameplateShowEnemies = "1", nameplateShowFriends = "0" } })
+    assert(count("Turned off:") == 1 and T.said("the damage meter") and T.said("friendly nameplates"), "one message at login")
+    assert(not T.said("enemy nameplates"), "enemy nameplates are on")
     T.fire("CVAR_UPDATE", "damageMeterEnabled", "0")
-    n = 0
-    for _, l in ipairs(T.printed) do if l:find("damage meter is turned off", 1, true) then n = n + 1 end end
-    assert(n == 1, "not repeated")
+    assert(count("Turned off:") == 1, "not repeated while nothing changed")
+    T.cvars.nameplateShowEnemies = "0"
+    T.fire("CVAR_UPDATE", "nameplateShowEnemies", "0")
+    assert(count("Turned off:") == 2 and T.said("enemy nameplates"), "switched off: warned")
+    T.cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriends = "1" }
+    T.fire("CVAR_UPDATE", "nameplateShowFriends", "1")
+    assert(T.said("all on"), "thanks once everything is back on")
+    SlashCmdList.CORPSERUN("check")
+    assert(T.said("on|r friendly nameplates"), "/cr check lists them")
+    T.boot({ cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriends = "1" } })
+    assert(not T.said("Turned off:"), "no warning when all are on")
     T.boot()
-    assert(not T.said("damage meter is turned off"), "no warning when it's on")
+    assert(not T.said("nameplates"), "unknown settings count as on")
+    -- Forever: friendly players' nameplates have their own setting.
+    T.boot({ cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriends = "0", nameplateShowFriendlyPlayers = "1" } })
+    assert(not T.said("Turned off:"), "friendly player nameplates on counts")
+    T.boot({ cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriendlyPlayers = "0" } })
+    assert(T.said("friendly nameplates"), "only the Forever setting, off")
 end)
 
 local function ListeningToAll()

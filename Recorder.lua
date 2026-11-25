@@ -244,6 +244,8 @@ end
 
 --- Store a kill report. victim: Character table (at least a name).
 --- killerIsMe: we landed the killing blow (when known).
+local NearbyHelpers   -- (victim, current attackers) -> other players fighting it; see below
+
 local function RecordKill(victim, honor, killerIsMe, source)
     local now = ns.Now()
     lastKill.name, lastKill.at, lastKill.source = victim.name, now, source
@@ -260,6 +262,8 @@ local function RecordKill(victim, honor, killerIsMe, source)
     -- killmails). The meter's breakdown replaces this after combat if it can.
     if report.instance_type ~= "pvp" then
         local mates = GroupInFight()
+        -- Players outside our group who were fighting it too (no damage known).
+        for _, h in ipairs(NearbyHelpers(victim, mates)) do mates[#mates + 1] = h end
         if #mates > 0 then report.attackers = mates end
     end
     if MeterUsable() then awaiting[report] = true end
@@ -542,6 +546,79 @@ end
 
 local function ResetFight()
     fight.since, fight.damage, fight.suspects = nil, 0, {}
+end
+
+-- ---------------------------------------------------------------------------
+-- Players outside our group fighting the same enemy. The meter only covers
+-- our group and the combat log is off limits, so all we can see is who was
+-- in combat with an enemy player as their target: friendly players on our
+-- target / focus / mouseover / nameplates (friendly nameplates only when the
+-- player has them switched on). Their damage stays unknown; their own report
+-- or the victim's fills it in on the site.
+-- ---------------------------------------------------------------------------
+
+local HELPER_WINDOW = 30        -- seen fighting the victim this recently counts
+local HELPER_SCAN_INTERVAL = 1  -- seconds between scans while we're in combat
+local MAX_HELPERS = 15          -- per kill (the server takes 40 attackers)
+local helpers = {}              -- [victim guid] = { [name] = { info, last } }
+local helperTicker
+
+local function ScanUnitForHelper(unit, now)
+    if not ns.Try(UnitExists, unit) or not ns.Try(UnitIsPlayer, unit) then return end
+    if ns.Try(UnitIsUnit, unit, "player") or ns.Try(UnitIsEnemy, "player", unit) then return end
+    if not ns.Try(UnitIsFriend, "player", unit) or not ns.Try(UnitAffectingCombat, unit) then return end
+    local target = unit .. "target"
+    if not ns.Try(UnitIsPlayer, target) or not ns.Try(UnitIsEnemy, "player", target) then return end
+    local victim = ns.Str(ns.Try(UnitGUID, target))
+    local guid = ns.Str(ns.Try(UnitGUID, unit))
+    if not victim or not guid or InMyGroup(guid) then return end
+    local info = ns.CharInfo(unit)
+    if not info then return end
+    local seen = helpers[victim] or {}
+    helpers[victim] = seen
+    seen[info.name] = { info = info, last = now }
+end
+
+local function ScanHelpers()
+    local now = ns.Now()
+    for victim, seen in pairs(helpers) do                 -- forget old sightings
+        local any = false
+        for name, h in pairs(seen) do
+            if now - h.last > HELPER_WINDOW * 2 then seen[name] = nil else any = true end
+        end
+        if not any then helpers[victim] = nil end
+    end
+    ScanUnitForHelper("target", now)
+    ScanUnitForHelper("focus", now)
+    ScanUnitForHelper("mouseover", now)
+    for unit in pairs(plates) do ScanUnitForHelper(unit, now) end
+end
+
+--- Players outside our group seen fighting `victim` (Characters, no damage),
+--- leaving out anyone already in `listed`.
+function NearbyHelpers(victim, listed)
+    pcall(ScanHelpers)                                    -- who's on it right now
+    local out, have = {}, {}
+    for _, c in ipairs(listed or {}) do have[c.name] = true end
+    local seen = victim and victim.guid and helpers[victim.guid]
+    if not seen then return out end
+    local now = ns.Now()
+    for name, h in pairs(seen) do
+        if not have[name] and now - h.last <= HELPER_WINDOW then out[#out + 1] = h.info end
+    end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    while #out > MAX_HELPERS do table.remove(out) end
+    return out
+end
+ns.NearbyHelpers = NearbyHelpers
+
+local function StartHelperScans()
+    if helperTicker or not (C_Timer and C_Timer.NewTicker) then return end
+    helperTicker = C_Timer.NewTicker(HELPER_SCAN_INTERVAL, function() pcall(ScanHelpers) end)
+end
+
+local function StopHelperScans()
+    if helperTicker then helperTicker:Cancel(); helperTicker = nil end
 end
 
 -- Enchant text from the in-game tooltip (modern clients expose C_TooltipInfo).
@@ -1058,6 +1135,15 @@ local function FillFromMeter()
         -- the kill was recorded).
         local attackers, mine, named = GroupDamageOn(fight, ns.Str(src.sourceGUID) or r.victim.guid)
         if named then
+            -- Keep the players outside our group seen fighting it (the meter
+            -- doesn't cover them): listed without damage, not in our group.
+            local have = {}
+            for _, a in ipairs(attackers) do have[a.name] = true end
+            for _, a in ipairs(r.attackers or {}) do
+                if a.damage == nil and not have[a.name] and not (a.guid and InMyGroup(a.guid)) then
+                    attackers[#attackers + 1] = a
+                end
+            end
             r.attackers = #attackers > 0 and attackers or nil
             if mine then r.reporter_damage = mine end
         end
@@ -1357,9 +1443,11 @@ local function OnEvent(event, ...)
     elseif event == "PLAYER_REGEN_DISABLED" then
         fight.since = fight.since or ns.Now()
         combatStart = ns.Now()
+        StartHelperScans()
     elseif event == "PLAYER_REGEN_ENABLED" then
         lastCombat = { start = combatStart, stop = ns.Now(), loc = Location() }
         combatStart = nil
+        StopHelperScans()
         -- Left combat alive: forget this fight (keep it if we're dead).
         if not ns.Try(UnitIsDeadOrGhost, "player") then ResetFight() end
         ScanSoon(1)
