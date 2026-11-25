@@ -1,4 +1,6 @@
 -- CorpseRun: debug log for finding out what the Forever client exposes.
+-- Off by default: `/cr debug on` starts it, `/cr debug off` stops it (saved
+-- account-wide). While off, nothing here listens to events or logs anything.
 -- Saved in WKillboardCharDB.debug (never exported or sent anywhere); read it
 -- from WTF/Account/<account>/<realm?>/<character>/SavedVariables/CorpseRun.lua
 -- after a /reload or logout. `/cr debug` shows a summary, `/cr debug clear` empties it.
@@ -31,6 +33,7 @@ end
 ns.Plain = Plain
 
 function ns.Debug(kind, data, maxDepth)
+    if not ns.DebugEnabled() then return end
     local log = WKillboardCharDB and WKillboardCharDB.debug
     if not log then return end
     local entry = Plain(data or {}, 0, maxDepth) or {}
@@ -264,9 +267,8 @@ local function InBattleground()
 end
 
 local function OnEvent(event, ...)
-    if event == "PLAYER_LOGIN" then
-        ProbeApis()
-    elseif event == "CHAT_MSG_COMBAT_HONOR_GAIN" then
+    if not ns.DebugEnabled() then return end
+    if event == "CHAT_MSG_COMBAT_HONOR_GAIN" then
         local msg = ...
         local name, honor = ns.ParseHonor(msg or "")
         ns.Debug("honor_msg", { text = msg, parsedName = name, parsedHonor = honor, enemies = VisibleEnemies() })
@@ -312,13 +314,11 @@ local function OnEvent(event, ...)
     end
 end
 
-for _, e in ipairs({
-    "PLAYER_LOGIN", "CHAT_MSG_COMBAT_HONOR_GAIN", "PLAYER_PVP_KILLS_CHANGED", "PLAYER_DEAD",
+local DEBUG_EVENTS = {
+    "CHAT_MSG_COMBAT_HONOR_GAIN", "PLAYER_PVP_KILLS_CHANGED", "PLAYER_DEAD",
     "CHAT_MSG_SYSTEM", "PLAYER_ENTERING_WORLD", "ZONE_CHANGED_NEW_AREA",
     "PLAYER_REGEN_ENABLED",
-}) do
-    pcall(frame.RegisterEvent, frame, e)
-end
+}
 frame:SetScript("OnEvent", function(_, event, ...)
     -- The debug log must never break the addon.
     pcall(OnEvent, event, ...)
@@ -327,23 +327,62 @@ end)
 -- ---------------------------------------------------------------------------
 -- Event discovery: which kill / death / PvP events does this client fire?
 -- Logs the first firing of each matching event name per 5 seconds, with args.
+-- Listens to every event, so it only runs while debug mode is on.
 -- ---------------------------------------------------------------------------
 
 local DISCOVER = { "KILL", "DIED", "DEATH", "HONOR", "PVP", "DAMAGE_METER", "COMBAT_TEXT", "SLAIN", "BLOW" }
 local NOISY = { CHAT_MSG_COMBAT_HONOR_GAIN = true, PLAYER_PVP_KILLS_CHANGED = true, PLAYER_DEAD = true }
 local lastSeen = {}
+local interesting = {}   -- [event] = true/false, worked out once per event name
+
+local function Interesting(event)
+    local match = interesting[event]
+    if match == nil then
+        match = false
+        if not NOISY[event] then
+            for _, word in ipairs(DISCOVER) do if event:find(word, 1, true) then match = true; break end end
+        end
+        interesting[event] = match
+    end
+    return match
+end
+
 local discovery = CreateFrame("Frame")
-if pcall(discovery.RegisterAllEvents, discovery) then
-    discovery:SetScript("OnEvent", function(_, event, ...)
-        if NOISY[event] or type(event) ~= "string" then return end
-        local match = false
-        for _, word in ipairs(DISCOVER) do if event:find(word, 1, true) then match = true; break end end
-        if not match then return end
-        local now = ns.Now()
-        if lastSeen[event] and now - lastSeen[event] < 5 then return end
-        lastSeen[event] = now
-        pcall(ns.Debug, "event", { name = event, args = { ... } }, 5)
-    end)
+discovery:SetScript("OnEvent", function(_, event, ...)
+    if type(event) ~= "string" or not Interesting(event) then return end
+    local now = ns.Now()
+    if lastSeen[event] and now - lastSeen[event] < 5 then return end
+    lastSeen[event] = now
+    pcall(ns.Debug, "event", { name = event, args = { ... } }, 5)
+end)
+
+-- ---------------------------------------------------------------------------
+-- On / off
+-- ---------------------------------------------------------------------------
+
+local probed = false
+
+--- Register (or drop) the debug listeners to match the saved setting. Called
+--- at login and whenever the setting changes.
+function ns.ApplyDebugMode()
+    local on = ns.DebugEnabled()
+    local method = on and frame.RegisterEvent or frame.UnregisterEvent
+    for _, e in ipairs(DEBUG_EVENTS) do pcall(method, frame, e) end
+    if on then
+        pcall(discovery.RegisterAllEvents, discovery)
+        -- The API probe walks all of _G: once per session, and only when debugging.
+        if not probed then
+            probed = true
+            pcall(ProbeApis)
+        end
+    else
+        pcall(discovery.UnregisterAllEvents, discovery)
+    end
+end
+
+function ns.SetDebugMode(on)
+    WKillboardDB.debugMode = on and true or nil
+    ns.ApplyDebugMode()
 end
 
 function ns.DebugSummary()
@@ -353,5 +392,7 @@ function ns.DebugSummary()
     local parts = {}
     for k, n in pairs(counts) do parts[#parts + 1] = k .. "=" .. n end
     table.sort(parts)
-    ns.Print("Debug log: %d entries (%s). Saved on /reload or logout.", #log, #parts > 0 and table.concat(parts, ", ") or "empty")
+    ns.Print("Debug mode is %s. Log: %d entries (%s). Saved on /reload or logout.",
+        ns.DebugEnabled() and "|cff3DDC84on|r" or "off (|cffffffff/cr debug on|r)",
+        #log, #parts > 0 and table.concat(parts, ", ") or "empty")
 end

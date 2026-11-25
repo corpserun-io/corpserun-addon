@@ -10,6 +10,12 @@ local function newFrame()
         if k == "SetScript" then return function(self, n, fn) self.scripts[n] = fn end end
         if k == "RegisterEvent" then return function(self, e) self.events[e] = true end end
         if k == "RegisterAllEvents" then return function(self) self.all = true end end
+        if k == "UnregisterAllEvents" then return function(self) self.all = false end end
+        if k == "RegisterUnitEvent" then return function(self, e, unit)
+            self.events[e] = true
+            rawset(self, "unitEvents", rawget(self, "unitEvents") or {})
+            self.unitEvents[e] = unit
+        end end
         if k == "UnregisterEvent" then return function(self, e) self.events[e] = nil end end
         if k == "IsShown" then return function(self) return self.shown end end
         if k == "Show" then return function(self) self.shown = true; if self.scripts.OnShow then self.scripts.OnShow(self) end end end
@@ -57,6 +63,7 @@ function T.boot(opts)
     T.recaps = {}            -- [recapID] = events (enemy deaths)
     T.meterDeaths = nil      -- C_DamageMeter Deaths session combatSources
     T.meterEnemy = nil       -- C_DamageMeter current-fight Enemy Damage Taken session
+    T.meterVictim = {}       -- [enemy GUID] = its Enemy Damage Taken breakdown (GetCombatSessionSourceFromType)
     T.inCombat = true
 
     local units = T.units
@@ -102,7 +109,12 @@ function T.boot(opts)
         return a == b
     end
     UnitIsDeadOrGhost = function(u) return units[u] ~= nil and units[u].dead == true end
-    UnitAffectingCombat = function() return T.inCombat end
+    UnitAffectingCombat = function(u)
+        if u == "player" then return T.inCombat end
+        return units[u] ~= nil and units[u].inCombat == true
+    end
+    UnitInRange = function(u) local x = units[u]; if x then return x.inRange ~= false, true end return false, false end
+    IsInRaid = function() return false end
     IsGUIDInGroup = function(g) for _, x in ipairs(T.group) do if x == g then return true end end return false end
     GetPlayerInfoByGUID = function(g)
         local p = T.guids[g]
@@ -119,7 +131,26 @@ function T.boot(opts)
     GetBuildInfo = function() return "1.60.1", "70959", "Nov 2026", toc end
     GetRealmName = function() return "Realm" end
     C_DeathRecap = { GetRecapEvents = function(id) if id then return T.recaps[id] end return T.recap end }
-    C_DamageMeter = { GetCombatSessionFromType = function(sessionType, meterType)
+    T.meterSessions = nil    -- the meter's kept fights: { { id, enemy = session, victims = { [guid] = breakdown } } }
+    local function fightById(id)
+        for _, f in ipairs(T.meterSessions or {}) do if f.id == id then return f end end
+    end
+    C_DamageMeter = { GetAvailableCombatSessions = function()
+        local out = {}
+        for _, f in ipairs(T.meterSessions or {}) do out[#out + 1] = { sessionID = f.id, durationSeconds = 20, name = "" } end
+        return out
+    end, GetCombatSessionFromID = function(id, meterType)
+        if T.inCombat then return T.SECRET end
+        local f = fightById(id)
+        if f and meterType == 10 then return f.enemy end
+    end, GetCombatSessionSourceFromID = function(id, meterType, guid)
+        if T.inCombat then return T.SECRET end
+        local f = fightById(id)
+        if f and meterType == 10 then return f.victims and f.victims[guid] end
+    end, GetCombatSessionSourceFromType = function(sessionType, meterType, guid)
+        if T.inCombat then return T.SECRET end
+        if sessionType == 1 and meterType == 10 then return T.meterVictim[guid] end
+    end, GetCombatSessionFromType = function(sessionType, meterType)
         if meterType == 9 and T.meterDeaths then
             if T.inCombat then return T.SECRET end
             return { combatSources = T.meterDeaths }

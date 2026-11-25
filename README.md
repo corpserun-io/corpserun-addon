@@ -65,7 +65,7 @@ every fight.
 | `/cr minimap` | Hide or show the minimap button (click it to open or close the window, drag it to move it) |
 | `/cr key <token>` | Set or change your API token |
 | `/cr test` | Export a test kill to check your key (the site doesn't save it) |
-| `/cr debug` | Debug log summary (`/cr debug clear` empties it) |
+| `/cr debug` | Debug log summary. Debug mode is off by default: `/cr debug on` / `/cr debug off` toggle it, `/cr debug clear` empties the log |
 | `/cr help` | List the commands |
 
 If another addon already uses `/cr`, type `/corpserun` instead; it does the

@@ -46,9 +46,11 @@ loader:SetScript("OnEvent", function(self, event, arg1)
         end
         WKillboardCharDB.reports = kept
         ns.PruneReports()
+        pcall(ns.CompactSignatures)
         self:UnregisterEvent("ADDON_LOADED")
     elseif event == "PLAYER_LOGIN" then
         WKillboardDB.identity = ns.CollectIdentity()
+        ns.ApplyDebugMode()
         ns.StartRecording()
         local pending = ns.PendingCount()
         if not ns.HasKey() then
@@ -146,6 +148,12 @@ SlashCmdList["CORPSERUN"] = function(msg)
             WKillboardCharDB.debug = {}
             WKillboardCharDB.debugScore = nil
             ns.Print("Debug log cleared.")
+        elseif arg == "on" then
+            ns.SetDebugMode(true)
+            ns.Print("Debug mode on: logging to the saved debug log. |cffffffff/cr debug off|r stops it.")
+        elseif arg == "off" then
+            ns.SetDebugMode(false)
+            ns.Print("Debug mode off. The log is kept until |cffffffff/cr debug clear|r.")
         else
             ns.DebugSummary()
         end
@@ -155,6 +163,13 @@ SlashCmdList["CORPSERUN"] = function(msg)
         ns.ClearReports(arg == "all")
     elseif cmd == "test" then
         ns.ShowTestExport()
+    elseif cmd == "backfill" then
+        local n = ns.Backfill()
+        if n > 0 then
+            ns.Print("Added %d follow-up report%s with your group's damage on kills already exported. Export to send them.", n, n == 1 and "" or "s")
+        else
+            ns.Print("Nothing to backfill: no exported group kill is missing damage that the debug log has.")
+        end
     elseif cmd == "minimap" then
         ns.ToggleMinimapButton()
     elseif cmd == "id" then
@@ -166,9 +181,10 @@ SlashCmdList["CORPSERUN"] = function(msg)
         ns.Print("/cr clear - remove reports you've already exported (/cr clear all: everything)")
         ns.Print("/cr key <token> - sign exports with your API token from the site")
         ns.Print("/cr test - export a test kill to check your key (not saved)")
+        ns.Print("/cr backfill - send your group's damage for exported kills that went out without it (from the debug log)")
         ns.Print("/cr minimap - hide or show the minimap button")
         ns.Print("/cr id - print identity info")
-        ns.Print("/cr debug [clear] - debug log summary (saved on /reload)")
+        ns.Print("/cr debug [on/off/clear] - debug mode (off by default) and its log summary")
         ns.Print("/corpserun works the same if another addon took /cr.")
     else
         ns.ToggleWindow()

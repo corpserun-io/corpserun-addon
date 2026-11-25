@@ -131,6 +131,16 @@ function ns.Snapshot(unit)
         for k, v in pairs(snapshots) do
             if v.seen < cutoff then snapshots[k] = nil else snapshotCount = snapshotCount + 1 end
         end
+        -- Still full of fresh ones (a very busy area): drop the oldest down to
+        -- 3/4, so the next snapshots don't each sweep the whole table again.
+        if snapshotCount > MAX_SNAPSHOTS then
+            local keys = {}
+            for k in pairs(snapshots) do keys[#keys + 1] = k end
+            table.sort(keys, function(a, b) return snapshots[a].seen < snapshots[b].seen end)
+            local target = math.floor(MAX_SNAPSHOTS * 3 / 4)
+            for i = 1, #keys - target do snapshots[keys[i]] = nil end
+            snapshotCount = math.min(#keys, target)
+        end
     end
     return info
 end

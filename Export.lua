@@ -54,6 +54,25 @@ local function Sign(key, json)
     return ns.ToHex(ns.HMAC_SHA256(key, json))
 end
 
+--- The JSON body a report is signed over: the report, the previous report's
+--- signature and the log's chain id.
+local function Body(r, prev)
+    local copy = Clean(r)
+    copy.prev = prev
+    copy.chain = WKillboardCharDB.chainId
+    return ns.ToJSON(copy)
+end
+
+--- The JSON a report was signed as. Older saves stored it (`_sig.r`); now it's
+--- rebuilt from the report (which doesn't change once signed: a change signs
+--- it again) and the `prev` it was signed with, so it isn't saved twice.
+local function SignedJSON(r)
+    local sig = r._sig
+    if sig.r then return sig.r end
+    return Body(r, sig.p or "")
+end
+ns.SignedJSON = SignedJSON
+
 --- Sign every report not yet signed with the current key, in log order. A
 --- signature (and the `prev` it commits to) never changes while the key stays
 --- the same; a new key re-signs the whole log.
@@ -67,15 +86,68 @@ function ns.SignReports()
         if not (r._sig and r._sig.kid == kid) then
             key = key or ns.FromHex(WKillboardDB.signKey)
             r.reporter = r.reporter or ns.PlayerReporter()
-            local copy = Clean(r)
-            copy.prev = prev
-            copy.chain = WKillboardCharDB.chainId
-            local json = ns.ToJSON(copy)
-            r._sig = { kid = kid, r = json, s = Sign(key, json) }
+            local json = Body(r, prev)
+            -- n: the body's length, a cheap check that the rebuilt copy matches.
+            r._sig = { kid = kid, p = prev, n = #json, s = Sign(key, json) }
         end
         prev = r._sig.s
     end
     return true
+end
+
+--- Saves from before signatures stopped storing their JSON: drop the stored
+--- copy where rebuilding it gives exactly the same text (kept otherwise).
+function ns.CompactSignatures()
+    for _, r in ipairs(WKillboardCharDB.reports) do
+        local sig = r._sig
+        if type(sig) == "table" and type(sig.r) == "string" then
+            local prev = sig.r:match('"prev":"(%x*)"')
+            if prev and Body(r, prev) == sig.r then
+                sig.p, sig.n, sig.r = prev, #sig.r, nil
+            end
+        end
+    end
+end
+
+--- The reports an export sends (mode "new": not exported yet; "all": every
+--- one) and how many unexported ones it holds back. In combat, a kill whose
+--- details (killmail, meter damage) only come after the fight is held, and so
+--- is everything after it: an exported report never changes again, and the
+--- reports not exported yet always stay one unbroken run at the end of the
+--- log, so a held kill can still be updated and signed again.
+local function Exportable(mode)
+    local inCombat = ns.Try(UnitAffectingCombat, "player") == true
+    local out, held, holding = {}, 0, false
+    for _, r in ipairs(WKillboardCharDB.reports) do
+        if not holding and inCombat and not r.exported_at and ns.AwaitingDetails and ns.AwaitingDetails(r) then
+            holding = true
+        end
+        if holding then
+            if not r.exported_at then held = held + 1 end
+        elseif mode == "all" or not r.exported_at then
+            out[#out + 1] = r
+        end
+    end
+    return out, held
+end
+
+--- Reports "new" would export right now, and how many it would hold back.
+function ns.ExportStatus()
+    local out, held = Exportable("new")
+    return #out, held
+end
+
+--- Signed entries ({ r = json, s = sig }) for these reports. Returns nil and
+--- the report not exported yet whose rebuilt JSON doesn't match what was
+--- signed (so it can be signed again), when checking.
+local function Entries(reports, check)
+    local entries = {}
+    for _, r in ipairs(reports) do
+        local json = SignedJSON(r)
+        if check and r._sig.n and #json ~= r._sig.n and not r.exported_at then return nil, r end
+        entries[#entries + 1] = { r = json, s = r._sig.s }
+    end
+    return entries
 end
 
 --- Signed envelope around already-signed report entries ({ r = json, s = sig }).
@@ -107,27 +179,34 @@ function ns.Encode(envelope)
     return "WKB2:j:" .. ns.Base64(json)
 end
 
---- Returns the blob and report count (or nil, 0, reason), and marks exported reports.
+--- Returns the blob, report count and how many reports were held back until
+--- combat ends (or nil, 0, reason, held), and marks exported reports.
 --- mode: "new" (not yet exported) or "all".
 function ns.Export(mode)
-    if not ns.HasKey() then return nil, 0, "nokey" end
+    if not ns.HasKey() then return nil, 0, "nokey", 0 end
     -- Pick up killmails the damage meter has ready (out of combat), so a kill
     -- from just now goes out with its attackers and damage, not bare.
     if ns.ScanKillmails then pcall(ns.ScanKillmails, true) end
     ns.SignReports()
-    local entries = {}
-    for _, r in ipairs(WKillboardCharDB.reports) do
-        if mode == "all" or not r.exported_at then
-            entries[#entries + 1] = { r = r._sig.r, s = r._sig.s }
+    local reports, held = Exportable(mode)
+    local entries, stale = Entries(reports, true)
+    if not entries then
+        -- A report's rebuilt copy doesn't match its signature (shouldn't
+        -- happen): the site hasn't seen it or anything after it, so sign
+        -- those again rather than send a signature that won't verify.
+        local list, from = WKillboardCharDB.reports, nil
+        for i, r in ipairs(list) do if r == stale then from = i; break end end
+        for i = from, #list do
+            if not list[i].exported_at then list[i]._sig = nil end
         end
+        ns.SignReports()
+        entries = Entries(reports, false)
     end
-    if #entries == 0 then return nil, 0, "empty" end
+    if #entries == 0 then return nil, 0, held > 0 and "held" or "empty", held end
     local blob = ns.Encode(Envelope(entries))
     local now = ns.Now()
-    for _, r in ipairs(WKillboardCharDB.reports) do
-        if mode == "all" or not r.exported_at then r.exported_at = now end
-    end
-    return blob, #entries
+    for _, r in ipairs(reports) do r.exported_at = now end
+    return blob, #entries, nil, held
 end
 
 local function NoKeyHelp()
@@ -217,17 +296,24 @@ function ns.ShowBlob(blob, count, note)
     exportFrame.edit:HighlightText()
 end
 
+local function HeldMessage(held)
+    return string.format("%d report%s held until you leave combat (kill details like attackers, damage and fight length "
+        .. "are only readable after the fight). Export again then.", held, held == 1 and "" or "s")
+end
+
 function ns.ShowExport(mode)
-    local blob, count, reason = ns.Export(mode or "new")
+    local blob, count, reason, held = ns.Export(mode or "new")
     if reason == "nokey" then return NoKeyHelp() end
     if not blob then
-        ns.Print("Nothing new to export. Use |cffffffff/cr export all|r to export the last 14 days again.")
+        if reason == "held" then
+            ns.Print("Nothing to export yet: " .. HeldMessage(held))
+        else
+            ns.Print("Nothing new to export. Use |cffffffff/cr export all|r to export the last 14 days again.")
+        end
         return
     end
     ns.ShowBlob(blob, count)
-    if ns.Try(UnitAffectingCombat, "player") then
-        ns.Print("Still in combat: kill details (attackers, damage, fight length) are added once you leave combat. Export again after.")
-    end
+    if held and held > 0 then ns.Print(HeldMessage(held)) end
     if ns.OnReportsChanged then ns.OnReportsChanged() end
 end
 

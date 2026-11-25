@@ -38,6 +38,22 @@ end
 local lastKill = { name = nil, at = 0, source = nil }
 local counter = 0
 
+-- Kills recorded without their details: the killmail / meter details only
+-- become readable out of combat. Cleared by the first full meter scan after
+-- them. (Session only: weak keys, so replaced reports just drop out.)
+local awaiting = setmetatable({}, { __mode = "k" })
+
+--- Can the game's damage meter add details to kills on this client?
+local function MeterUsable()
+    return C_DamageMeter and C_DamageMeter.GetCombatSessionFromType and C_DeathRecap and C_DeathRecap.GetRecapEvents
+        and not (ns.DamageMeterOff and ns.DamageMeterOff()) and true or false
+end
+
+--- Is this kill still waiting for details the meter will add after combat?
+function ns.AwaitingDetails(r)
+    return awaiting[r] == true
+end
+
 local function Reports()
     return WKillboardCharDB.reports
 end
@@ -69,9 +85,53 @@ local function Location()
     return loc
 end
 
+--- A copy of just the location fields of a report or Location() result.
+local LOCATION_KEYS = { "zone", "subzone", "map_id", "x", "y", "instance_type" }
+local function CopyLocation(from)
+    local loc = {}
+    for _, k in ipairs(LOCATION_KEYS) do loc[k] = from[k] end
+    return loc
+end
+
 local function GroupSize()
     local n = ns.Try(GetNumGroupMembers) or 0
     return n > 0 and n or 1
+end
+
+-- ---------------------------------------------------------------------------
+-- Our group on a kill. Open-world kills have no killmail (the meter lists
+-- enemy deaths only in battlegrounds), so who else fought comes from the
+-- group. With no attackers on a report the site credits the reporter alone,
+-- which is right for a 1v1 but not for a party kill.
+-- ---------------------------------------------------------------------------
+
+--- The other members of our group, as unit tokens.
+local function GroupUnits()
+    local out = {}
+    if (ns.Try(GetNumGroupMembers) or 0) == 0 then return out end
+    local prefix, count = "party", 4
+    if ns.Try(IsInRaid) then prefix, count = "raid", 40 end
+    for i = 1, count do
+        local unit = prefix .. i
+        if ns.Try(UnitExists, unit) and not ns.Try(UnitIsUnit, unit, "player") then out[#out + 1] = unit end
+    end
+    return out
+end
+
+--- Group members in the fight right now: in combat (or dead) and in range
+--- (when the client can tell). Characters, without damage.
+local function GroupInFight()
+    local out = {}
+    for _, unit in ipairs(GroupUnits()) do
+        local fighting = ns.Try(UnitAffectingCombat, unit) == true
+            or ns.Try(UnitIsDead or UnitIsDeadOrGhost, unit) == true
+        local inRange, checked = ns.Try(UnitInRange, unit)
+        if fighting and not (checked == true and inRange ~= true) then
+            local info = ns.CharInfo(unit)
+            if info then out[#out + 1] = info end
+        end
+    end
+    return out
 end
 
 local function Store(report)
@@ -109,6 +169,17 @@ function ns.DropReports(keep)
     if tail and not (cur and (cur.seq or 0) > tail.seq) then WKillboardCharDB.chainTail = tail end
     WKillboardCharDB.reports = kept
     return removed
+end
+
+--- Clear the signatures of the reports from position `from` to the end, so
+--- the next SignReports signs them again with their current contents and the
+--- right `prev`. Only for reports not exported yet (the site has seen none of
+--- those signatures); changes nothing and returns false if one was exported.
+local function Unsign(from)
+    local list = Reports()
+    for i = from, #list do if list[i].exported_at then return false end end
+    for i = from, #list do list[i]._sig = nil end
+    return true
 end
 
 --- Drop reports older than KEEP_DAYS.
@@ -185,6 +256,13 @@ local function RecordKill(victim, honor, killerIsMe, source)
     report.honor = honor
     report.group_size = GroupSize()
     if killerIsMe then report.killer = ns.PlayerReporter() end
+    -- Group members fighting alongside us (open world; battlegrounds have
+    -- killmails). The meter's breakdown replaces this after combat if it can.
+    if report.instance_type ~= "pvp" then
+        local mates = GroupInFight()
+        if #mates > 0 then report.attackers = mates end
+    end
+    if MeterUsable() then awaiting[report] = true end
     Store(report)
     ns.Print("Recorded kill: |cffffffff%s|r%s. %d to export (/cr).",
         victim.name, honor and string.format(" (+%d honor)", honor) or "", ns.PendingCount())
@@ -226,7 +304,7 @@ local hkCount                  -- last seen session honorable kills
 local pending = {}             -- kills waiting for a victim: { at = time, clock = GetTime }
 local recentVictims = {}       -- [name] = time recorded (avoid double counting)
 local removed = {}             -- vanished enemy nameplates: { info, at, dead }
-local died = {}                -- UNIT_DIED player deaths: { guid, at }
+local died = {}                -- UNIT_DIED player deaths: { guid, at, loc }
 local ResolvePending           -- (defined below)
 
 local function Clock() return (GetTime and ns.Num(GetTime())) or ns.Now() end
@@ -286,7 +364,8 @@ end
 local function OnUnitDied(guid)
     guid = ns.Str(guid)                       -- secret / missing -> nil
     if not guid or not guid:find("^Player%-") then return end
-    died[#died + 1] = { guid = guid, at = Clock() }
+    -- Where we were when they died: the location a later killmail uses.
+    died[#died + 1] = { guid = guid, at = Clock(), loc = Location() }
     while #died > 40 do table.remove(died, 1) end
     if #pending > 0 then pcall(ResolvePending) end
 end
@@ -360,7 +439,7 @@ ResolvePending = function()
     for _, info in ipairs(DeadEnemies()) do add(info, "visible_dead", 90) end
     for _, r in ipairs(near) do if not r.dead then add(r.info, "nameplate_gone") end end
 
-    if ns.Debug then
+    if ns.DebugEnabled() then
         local dbgDied, dbgRemoved = {}, {}
         for _, d in ipairs(died) do
             if math.abs(d.at - killClock) <= 10 then
@@ -392,7 +471,7 @@ ResolvePending = function()
         if now - pending[i].at > RESOLVE_TIMEOUT then
             table.remove(pending, i)
             -- Usually a group kill we weren't part of: debug log only, no chat noise.
-            if ns.Debug then pcall(ns.Debug, "kill_unresolved", {}) end
+            if ns.DebugEnabled() then pcall(ns.Debug, "kill_unresolved", {}) end
         end
     end
 end
@@ -434,12 +513,31 @@ local function ScanUnitForSuspect(unit, now)
     fight.suspects[info.name] = s
 end
 
+local SUSPECT_SCAN_INTERVAL = 0.5  -- seconds between scans while we take damage
+local plates = {}                  -- [unit] = true for nameplates currently shown
+local lastSuspectScan
+
+--- The nameplates shown right now (after login / a loading screen; the
+--- NAME_PLATE_UNIT_* events keep it current after that).
+local function SeedPlates()
+    plates = {}
+    for i = 1, 40 do
+        local unit = "nameplate" .. i
+        if ns.Try(UnitExists, unit) then plates[unit] = true end
+    end
+end
+
 -- Who is attacking us? Enemy players (target, focus, nameplates) targeting us.
+-- Runs on our damage taken, which can be many times a second: at most every
+-- SUSPECT_SCAN_INTERVAL, and only over nameplates that exist.
 local function ScanSuspects()
+    local clock = Clock()
+    if lastSuspectScan and clock - lastSuspectScan >= 0 and clock - lastSuspectScan < SUSPECT_SCAN_INTERVAL then return end
+    lastSuspectScan = clock
     local now = ns.Now()
     ScanUnitForSuspect("target", now)
     ScanUnitForSuspect("focus", now)
-    for i = 1, 40 do ScanUnitForSuspect("nameplate" .. i, now) end
+    for unit in pairs(plates) do ScanUnitForSuspect(unit, now) end
 end
 
 local function ResetFight()
@@ -512,13 +610,17 @@ end
 --- { attackers = {...}, killer = Character, damage = n, duration = n } or nil.
 --- Parse a death recap (events newest first) into who died, who hit them with
 --- what and how hard, and who landed the killing blow. Players only (pets and
---- NPCs count toward damage taken but aren't attackers).
-local function ParseRecap(events)
+--- NPCs count toward damage taken but aren't attackers). The victim's own hits
+--- (a warlock's Life Tap or Hellfire) count as damage taken but never make them
+--- an attacker: when they finished themselves, the newest enemy hit before
+--- that gets the killing blow. selfGUID: the victim when the events don't say.
+local function ParseRecap(events, selfGUID)
     if type(events) ~= "table" or #events == 0 then return nil end
     local byName, order, total, first, last = {}, {}, 0, nil, nil
     local killer
     local sources = {}                         -- every source GUID (incl. pets)
     local victimFull, victimGUID = ns.Str(events[1].destName), ns.Str(events[1].destGUID)
+    local victimSelf = victimGUID or selfGUID
     for _, e in ipairs(events) do
         local srcGUID = ns.Str(e.sourceGUID)
         if srcGUID then sources[srcGUID] = true end
@@ -527,7 +629,7 @@ local function ParseRecap(events)
         if ts then first = math.min(first or ts, ts); last = math.max(last or ts, ts) end
         if amount and amount > 0 then total = total + amount end
         local src, guid = ns.Str(e.sourceName), ns.Str(e.sourceGUID)
-        if src and guid and guid:find("^Player%-") then
+        if src and guid and guid:find("^Player%-") and guid ~= victimSelf then
             local a = byName[src]
             if not a then
                 a = { full = src, guid = guid, damage = 0, abilities = {} }
@@ -576,7 +678,7 @@ local function ReadRecap(diedAt)
     if not (C_DeathRecap and C_DeathRecap.GetRecapEvents) then return nil end
     local ok, events = pcall(C_DeathRecap.GetRecapEvents)
     if not ok then return nil end
-    local recap = ParseRecap(events)
+    local recap = ParseRecap(events, ns.Str(ns.Try(UnitGUID, "player")))
     if not recap or not recap.newest or math.abs(recap.newest - diedAt) > 30 then return nil end
     return recap
 end
@@ -612,7 +714,7 @@ local function FinishDeath(report, fightCopy, diedAt, suspects)
     -- Only PvP deaths: enemy players involved, or inside a battleground.
     if not report.attackers and report.instance_type ~= "pvp" then return end
     Store(report)
-    if ns.Debug then pcall(ns.Debug, "death_recorded", { recap = recap ~= nil and recap.attackers ~= nil, attackers = report.attackers and #report.attackers or 0, killer = report.killer and report.killer.name }) end
+    if ns.DebugEnabled() then pcall(ns.Debug, "death_recorded", { recap = recap ~= nil and recap.attackers ~= nil, attackers = report.attackers and #report.attackers or 0, killer = report.killer and report.killer.name }) end
     ns.Print("Recorded death%s. %d to export (/cr).",
         report.killer and (" to |cffffffff" .. report.killer.name .. "|r") or "", ns.PendingCount())
     if ns.OnReportsChanged then ns.OnReportsChanged() end
@@ -623,7 +725,7 @@ local function OnPlayerDead()
     if nowDead - lastDeathAt < DEATH_DEDUPE then return end
     lastDeathAt = nowDead
     -- Debug log first: the fight state is reset below.
-    if ns.Debug then
+    if ns.DebugEnabled() then
         pcall(ns.Debug, "death", { fight = ns.FightSnapshot(), enemies = ns.DebugVisibleEnemies and ns.DebugVisibleEnemies() })
     end
     local now = ns.Now()
@@ -655,8 +757,13 @@ end
 -- The meter is secret during combat, so this runs whenever we're out of it.
 -- ---------------------------------------------------------------------------
 
+local combatStart               -- when we last entered combat
+local lastCombat                -- { start, stop, loc } of the last finished fight
+
 local KILLMAIL_THROTTLE = 4
+local RECAP_TRIES = 3           -- scans an unreadable recap is retried
 local lastKillmailScan = 0
+local recapTries = {}           -- [recapID] = failed reads this session
 local DEATHS = 9                -- Enum.DamageMeterType.Deaths
 
 --- A Character without the attacker-only fields.
@@ -673,6 +780,23 @@ local function SameName(a, b)
     return not (a.surname and b.surname) or a.surname:lower() == b.surname:lower()
 end
 
+--- Where a killmail's kill happened (as best we know: our own position). The
+--- scan runs after the fight, maybe much later, so in order: the bare kill it
+--- replaces -> where we were when UNIT_DIED reported the victim -> where the
+--- fight it belongs to ended -> where we are now.
+local function KillmailLocation(km, at, replacedLoc)
+    if replacedLoc then return replacedLoc end
+    if km.victimGUID then
+        for i = #died, 1, -1 do
+            if died[i].guid == km.victimGUID and died[i].loc then return CopyLocation(died[i].loc) end
+        end
+    end
+    if lastCombat and lastCombat.loc and at >= (lastCombat.start or lastCombat.stop - 120) - 5 and at <= lastCombat.stop + 5 then
+        return CopyLocation(lastCombat.loc)
+    end
+    return Location()
+end
+
 local function RecordKillmail(km, src)
     local victim = CharFromFullName(km.victimFull, km.victimGUID)
     victim.class = victim.class or (ns.Str(src.classFilename))
@@ -681,19 +805,24 @@ local function RecordKillmail(km, src)
 
     -- A sparse kill the honorable-kill counter already recorded for this victim
     -- (not exported yet) is replaced by the full killmail.
-    local honor
+    local honor, removedAt, replacedLoc
     local list = Reports()
     for i = #list, 1, -1 do
         local r = list[i]
         if r.kind == "kill" and r.victim and SameName(r.victim, victim) and not r.exported_at
             and math.abs((r.occurred_at or 0) - at) <= 120 then
             honor = honor or r.honor
+            replacedLoc = replacedLoc or CopyLocation(r)
             table.remove(list, i)
+            removedAt = i
         end
     end
+    -- Reports signed after the removed one pointed back at it: sign them again
+    -- (Store below does) so the chain links real reports.
+    if removedAt then Unsign(removedAt) end
 
     local myGUID = ns.Try(UnitGUID, "player")
-    local report = Location()
+    local report = KillmailLocation(km, at, replacedLoc)
     report.client_id = NewClientId("k")
     report.kind = "kill"
     report.occurred_at = at
@@ -719,7 +848,7 @@ local function RecordKillmail(km, src)
     recentVictims[victim.name] = ns.Now()
     lastKill.name, lastKill.at, lastKill.source = victim.name, ns.Now(), "killmail"
     Store(report)
-    if ns.Debug then pcall(ns.Debug, "killmail", { victim = victim.name, killer = km.killer and km.killer.name, attackers = km.attackers and #km.attackers or 0 }) end
+    if ns.DebugEnabled() then pcall(ns.Debug, "killmail", { victim = victim.name, killer = km.killer and km.killer.name, attackers = km.attackers and #km.attackers or 0 }) end
     local kb = km.killer and (km.killer.guid == myGUID and "your killing blow" or ("killing blow: " .. km.killer.name)) or nil
     ns.Print("Recorded kill: |cffffffff%s|r%s. %d to export (/cr).", victim.name, kb and (" (" .. kb .. ")") or "", ns.PendingCount())
     if ns.OnReportsChanged then ns.OnReportsChanged() end
@@ -734,42 +863,214 @@ end
 -- ---------------------------------------------------------------------------
 
 local ENEMY_DAMAGE = 10         -- Enum.DamageMeterType.EnemyDamageTaken
-local combatStart               -- when we last entered combat
-local lastCombat                -- { start, stop } of the last finished fight
 
-local function FillFromMeter()
-    if not lastCombat then return end
-    local from = (lastCombat.start or (lastCombat.stop - 120)) - 5
-    local to = lastCombat.stop + 5
-    local pending = {}
-    for _, r in ipairs(Reports()) do
-        if r.kind == "kill" and r.victim and not r.exported_at and not r.meter_damage and not r.damage_taken
-            and (r.occurred_at or 0) >= from and (r.occurred_at or 0) <= to then
-            pending[#pending + 1] = r
-        end
-    end
-    if #pending == 0 then return end
-    local ok, session = pcall(C_DamageMeter.GetCombatSessionFromType, 1, ENEMY_DAMAGE)   -- current fight
-    if not ok or type(session) ~= "table" or ns.IsSecret(session) or type(session.combatSources) ~= "table" then return end
-    local duration = ns.Num(session.durationSeconds)
-    local filled = 0
-    for _, src in ipairs(session.combatSources) do
-        local amount = ns.Num(src.totalAmount)
-        local guid = ns.Str(src.sourceGUID)
-        local name, surname = ns.SplitName(ns.Str(src.name))
-        for _, r in ipairs(pending) do
-            local match = (guid and r.victim.guid and guid == r.victim.guid)
-                or ((not guid or not r.victim.guid) and name and SameName(r.victim, { name = name, surname = surname }))
-            if match and amount and amount > 0 and not r.meter_damage then
-                r.meter_damage = math.floor(amount + 0.5)
-                if r.group_size == 1 then r.reporter_damage = r.reporter_damage or r.meter_damage end
-                if duration and duration > 0 and not r.duration_sec then r.duration_sec = math.floor(duration + 0.5) end
-                filled = filled + 1
+local function SpellName(id)
+    if not id then return nil end
+    local name = C_Spell and C_Spell.GetSpellName and ns.Try(C_Spell.GetSpellName, id)
+    return ns.Str(name) or ns.Str((ns.Try(GetSpellInfo, id)))
+end
+
+--- The meter's breakdown of the damage an enemy took this fight: per unit
+--- that hit it, its damage and spells. Returns [lower first name] =
+--- { name, surname, damage, spells = { [spellID] = damage } }, or nil when the
+--- breakdown names nobody (the client doesn't give one).
+local function ParseBreakdown(source)
+    if type(source) ~= "table" or ns.IsSecret(source) then return nil end
+    local spells = source.combatSpells or source.spells
+    if type(spells) ~= "table" then return nil end
+    local byName, named = {}, false
+    -- Forever: one entry per unit that hit the enemy (spellID 0), its damage
+    -- in the entry's totalAmount and a single combatSpellDetails table naming
+    -- the unit (its own amount is 0). Per-spell entries listing several units,
+    -- each with an amount, are read too.
+    for _, spell in ipairs(spells) do
+        local details = type(spell) == "table" and (spell.combatSpellDetails or spell.details) or nil
+        if type(details) == "table" and details[1] == nil then details = { details } end
+        if type(details) ~= "table" then details = {} end
+        for _, d in ipairs(details) do
+            local full = type(d) == "table" and (ns.Str(d.unitName) or ns.Str(d.name) or ns.Str(d.sourceName))
+            local name, surname = ns.SplitName(full)
+            local amount = type(d) == "table" and (ns.Num(d.amount) or ns.Num(d.totalAmount))
+            if (not amount or amount <= 0) and #details == 1 then amount = ns.Num(spell.totalAmount) end
+            if name and amount and amount > 0 then
+                named = true
+                local key = name:lower()
+                local a = byName[key] or { name = name, surname = surname, damage = 0, spells = {} }
+                byName[key] = a
+                a.damage = a.damage + amount
+                local id = ns.Num(spell.spellID)
+                if id and id > 0 then a.spells[id] = (a.spells[id] or 0) + amount end
             end
         end
     end
+    return named and byName or nil
+end
+
+--- An attacker entry: `info` (a Character) with a breakdown line's damage
+--- and top ability.
+local function WithDamage(info, line)
+    local out = {}
+    for k, v in pairs(info) do out[k] = v end
+    out.damage = math.floor(line.damage + 0.5)
+    local top, topDmg = nil, -1
+    for id, dmg in pairs(line.spells) do if dmg > topDmg then top, topDmg = id, dmg end end
+    out.top_ability = SpellName(top)
+    return out
+end
+
+local function MyKey()
+    return (ns.ShortName(ns.Try(UnitName, "player")) or ""):lower()
+end
+
+--- Who in our group damaged an enemy this fight (see ParseBreakdown).
+--- Returns attackers (group members: Characters with damage and top ability,
+--- most damage first), our own damage, and whether the breakdown named anyone
+--- (if it didn't, nothing should change).
+local function GroupDamageOn(fight, guid)
+    if not (guid and fight.breakdown) then return nil end
+    local ok, source = pcall(fight.breakdown, guid)
+    -- Kept in the debug log (and used by /cr backfill).
+    if ns.DebugEnabled() then pcall(ns.Debug, "meter_victim", { guid = guid, ok = ok, source = source }, 7) end
+    if not ok then return nil end
+    local byName = ParseBreakdown(source)
+    if not byName then return nil end
+    local attackers = {}
+    for _, unit in ipairs(GroupUnits()) do
+        local line = byName[(ns.ShortName(ns.Try(UnitName, unit)) or ""):lower()]
+        local info = line and ns.CharInfo(unit)
+        if info then attackers[#attackers + 1] = WithDamage(info, line) end
+    end
+    table.sort(attackers, function(x, y) return x.damage > y.damage end)
+    local mine = byName[MyKey()]
+    return attackers, mine and math.floor(mine.damage + 0.5) or nil, true
+end
+
+local SESSION_LOOKBACK = 12     -- recent fights searched for a kill's victim after combat
+local FILL_WINDOW = 15 * 60     -- kills this recent can still get their meter details
+
+--- The fights to look in for kills' victims, newest first, each
+--- { key, session() -> Enemy Damage Taken session, breakdown(guid) }. The
+--- meter keeps every fight (by session ID); back-to-back fights each have
+--- their own. Without that API, only the current fight (and `false`).
+local function Fights(lookback)
+    local fights = {}
+    local ok, list = false, nil
+    if C_DamageMeter.GetAvailableCombatSessions and C_DamageMeter.GetCombatSessionFromID then
+        ok, list = pcall(C_DamageMeter.GetAvailableCombatSessions)
+    end
+    if ok and type(list) == "table" and not ns.IsSecret(list) and #list > 0 then
+        local ids = {}
+        for _, entry in ipairs(list) do
+            local id = type(entry) == "table" and ns.Num(entry.sessionID)
+            if id then ids[#ids + 1] = id end
+        end
+        table.sort(ids, function(a, b) return a > b end)
+        local bySource = C_DamageMeter.GetCombatSessionSourceFromID
+        for n = 1, math.min(#ids, lookback or SESSION_LOOKBACK) do
+            local id = ids[n]
+            fights[#fights + 1] = {
+                key = id,
+                session = function() return C_DamageMeter.GetCombatSessionFromID(id, ENEMY_DAMAGE) end,
+                breakdown = bySource and function(guid) return bySource(id, ENEMY_DAMAGE, guid) end,
+            }
+        end
+        if #fights > 0 then return fights, true end
+    end
+    local byType = C_DamageMeter.GetCombatSessionSourceFromType
+    fights[1] = {
+        key = "current",
+        session = function() return C_DamageMeter.GetCombatSessionFromType(1, ENEMY_DAMAGE) end,
+        breakdown = byType and function(guid) return byType(1, ENEMY_DAMAGE, guid) end,
+    }
+    return fights, false
+end
+
+--- A fight's Enemy Damage Taken session (cached per lookup in `cache`).
+local function FightSession(fight, cache)
+    local session = cache[fight]
+    if session == nil then
+        local ok, s = pcall(fight.session)
+        session = ok and type(s) == "table" and not ns.IsSecret(s) and type(s.combatSources) == "table" and s or false
+        cache[fight] = session
+    end
+    return session or nil
+end
+
+--- The victim's line in a fight's Enemy Damage Taken (by GUID, or by name when
+--- either GUID is missing), if they took damage there.
+local function VictimSource(session, victim)
+    for _, src in ipairs(session.combatSources) do
+        local guid = ns.Str(src.sourceGUID)
+        local name, surname = ns.SplitName(ns.Str(src.name))
+        local amount = ns.Num(src.totalAmount)
+        if amount and amount > 0 and ((guid and victim.guid and guid == victim.guid)
+            or ((not guid or not victim.guid) and name and SameName(victim, { name = name, surname = surname }))) then
+            return src
+        end
+    end
+end
+
+--- For each kill (newest first: a victim killed twice gets the newest fight
+--- for the newest kill), the newest fight it took damage in that no other
+--- kill of it has taken. Calls found(r, fight, session, src) per match.
+local function MatchFights(kills, fights, found)
+    local cache, used = {}, {}
+    for _, r in ipairs(kills) do
+        for _, fight in ipairs(fights) do
+            local session = FightSession(fight, cache)
+            local src = session and VictimSource(session, r.victim)
+            local key = src and (tostring(fight.key) .. "|" .. (ns.Str(src.sourceGUID) or r.victim.name or ""))
+            if src and not used[key] then
+                used[key] = true
+                found(r, fight, session, src)
+                break
+            end
+        end
+    end
+end
+
+local function FillFromMeter()
+    local fights, bySession = Fights()
+    local from, to
+    if bySession then
+        from, to = ns.Now() - FILL_WINDOW, math.huge
+    else
+        -- Only the current fight is readable: only kills made during it.
+        if not lastCombat then return end
+        from = (lastCombat.start or (lastCombat.stop - 120)) - 5
+        to = lastCombat.stop + 5
+    end
+    local pending, index = {}, {}
+    for i, r in ipairs(Reports()) do
+        if r.kind == "kill" and r.victim and not r.exported_at and not r.meter_damage and not r.damage_taken
+            and (r.occurred_at or 0) >= from and (r.occurred_at or 0) <= to then
+            pending[#pending + 1] = r
+            index[r] = i
+        end
+    end
+    if #pending == 0 then return end
+    table.sort(pending, function(a, b) return index[a] > index[b] end)
+    local filled, firstChanged = 0, nil
+    MatchFights(pending, fights, function(r, fight, session, src)
+        r.meter_damage = math.floor(ns.Num(src.totalAmount) + 0.5)
+        if r.group_size == 1 then r.reporter_damage = r.reporter_damage or r.meter_damage end
+        -- Who in the group hit it, and how hard (replaces the guess made when
+        -- the kill was recorded).
+        local attackers, mine, named = GroupDamageOn(fight, ns.Str(src.sourceGUID) or r.victim.guid)
+        if named then
+            r.attackers = #attackers > 0 and attackers or nil
+            if mine then r.reporter_damage = mine end
+        end
+        local duration = ns.Num(session.durationSeconds)
+        if duration and duration > 0 and not r.duration_sec then r.duration_sec = math.floor(duration + 0.5) end
+        filled = filled + 1
+        if not firstChanged or index[r] < firstChanged then firstChanged = index[r] end
+    end)
     if filled > 0 then
-        if ns.Debug then pcall(ns.Debug, "meter_fill", { filled = filled, duration = duration }) end
+        -- These kills were signed when recorded: sign them (and the ones after
+        -- them, whose `prev` changes) again, or the export sends the old copy.
+        if Unsign(firstChanged) and ns.SignReports then pcall(ns.SignReports) end
+        if ns.DebugEnabled() then pcall(ns.Debug, "meter_fill", { filled = filled, bySession = bySession }) end
         if ns.OnReportsChanged then ns.OnReportsChanged() end
     end
 end
@@ -798,11 +1099,20 @@ function ns.ScanKillmails(force)
                     local km = okRecap and ParseRecap(events) or nil
                     if km and km.victimFull then
                         seen[recapID] = now
+                        recapTries[recapID] = nil
                         -- Only deaths we (or our pet) took part in: our kills and assists.
                         local involved = (myGUID and km.sources[myGUID]) or (petGUID and km.sources[petGUID])
                         local friendly = km.victimGUID and (km.victimGUID == myGUID or InMyGroup(km.victimGUID))
                         if involved and not friendly then
                             pcall(RecordKillmail, km, src)
+                        end
+                    else
+                        -- Not readable (maybe not filled in yet): try a few more
+                        -- scans, then stop fetching it every time.
+                        recapTries[recapID] = (recapTries[recapID] or 0) + 1
+                        if recapTries[recapID] >= RECAP_TRIES then
+                            seen[recapID] = now
+                            recapTries[recapID] = nil
                         end
                     end
                 end
@@ -811,11 +1121,181 @@ function ns.ScanKillmails(force)
     end
     -- Then open-world kills the killmails didn't cover.
     pcall(FillFromMeter)
+    -- Every kill recorded before this scan has had its chance at details:
+    -- they're ready to export.
+    if next(awaiting) then
+        for r in pairs(awaiting) do awaiting[r] = nil end
+        if ns.OnReportsChanged then pcall(ns.OnReportsChanged) end
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- /cr backfill: exported kills whose group members went out without damage
+-- (recorded before the meter breakdown was read) get a follow-up report with
+-- each member's damage, from the breakdowns kept in the debug log. The follow-
+-- up is a new signed report for the same victim at the same time: the site
+-- merges it into the kill. Nothing already signed or exported changes.
+-- ---------------------------------------------------------------------------
+
+local BACKFILL_WINDOW = 180     -- seconds after a kill its breakdown may have been read
+
+local function HasDamage(attackers)
+    for _, a in ipairs(attackers) do if a.damage then return true end end
+    return false
+end
+
+--- Is this report a backfill follow-up (not a kill of its own)?
+function ns.IsFollowUp(r)
+    local f = WKillboardCharDB.followUps
+    return f ~= nil and r.client_id ~= nil and f[r.client_id] ~= nil
+end
+
+local BACKFILL_LOOKBACK = math.huge   -- /cr backfill searches every fight the meter still holds
+
+--- Returns how many follow-up reports were added.
+function ns.Backfill()
+    local log = WKillboardCharDB.debug or {}
+    WKillboardCharDB.backfilled = WKillboardCharDB.backfilled or {}   -- [kill client_id] = follow-up client_id
+    WKillboardCharDB.followUps = WKillboardCharDB.followUps or {}     -- [follow-up client_id] = kill client_id
+    local done, me = WKillboardCharDB.backfilled, MyKey()
+    local list = Reports()
+    local index, kills = {}, {}
+    for i, r in ipairs(list) do
+        index[r] = i
+        -- Exported group kills whose members went out without damage.
+        if r.kind == "kill" and r.exported_at and r.victim and r.victim.guid and r.client_id and not done[r.client_id]
+            and not ns.IsFollowUp(r) and ((r.group_size or 1) > 1 or (type(r.attackers) == "table" and #r.attackers > 0))
+            and not HasDamage(r.attackers or {}) then
+            kills[#kills + 1] = r
+        end
+    end
+    table.sort(kills, function(a, b) return index[a] > index[b] end)
+
+    local made = 0
+    --- A follow-up for kill r from a breakdown: the group members the kill
+    --- names. A grouped kill sent with no members at all (older addon) takes
+    --- everyone the breakdown names: the meter counts only our group's damage.
+    local function FollowUp(r, byName, total, duration)
+        local known, anyone = {}, (r.group_size or 1) > 1 and not (r.attackers and #r.attackers > 0)
+        for _, a in ipairs(r.attackers or {}) do if a.name then known[a.name:lower()] = a end end
+        local attackers = {}
+        for key, line in pairs(byName) do
+            if key ~= me and (known[key] or anyone) then
+                attackers[#attackers + 1] = WithDamage(known[key] or { name = line.name, surname = line.surname }, line)
+            end
+        end
+        table.sort(attackers, function(x, y) return x.damage > y.damage end)
+        local mine = byName[me] and math.floor(byName[me].damage + 0.5) or nil
+        if #attackers == 0 and not mine then return false end
+        local f = CopyLocation(r)
+        f.client_id = NewClientId("k")
+        f.kind = "kill"
+        f.occurred_at = r.occurred_at
+        f.victim = {}
+        for k, v in pairs(r.victim) do f.victim[k] = v end
+        f.group_size = r.group_size
+        f.attackers = #attackers > 0 and attackers or nil
+        f.reporter_damage = mine
+        f.meter_damage = total and total > 0 and math.floor(total + 0.5) or r.meter_damage
+        f.duration_sec = r.duration_sec or (duration and duration > 0 and math.floor(duration + 0.5)) or nil
+        done[r.client_id] = f.client_id
+        WKillboardCharDB.followUps[f.client_id] = r.client_id
+        Store(f)
+        made = made + 1
+        return true
+    end
+
+    -- 1. The breakdown the debug log kept from right after the kill.
+    local rest = {}
+    for _, r in ipairs(kills) do
+        local at, best = r.occurred_at or 0, nil
+        for _, e in ipairs(log) do
+            if e.kind == "meter_victim" and e.guid == r.victim.guid and type(e.t) == "number"
+                and e.t >= at - 5 and e.t <= at + BACKFILL_WINDOW and (not best or e.t < best.t) then
+                best = e
+            end
+        end
+        local byName = best and ParseBreakdown(best.source)
+        if not (byName and FollowUp(r, byName, ns.Num(best.source.totalAmount), nil)) then rest[#rest + 1] = r end
+    end
+
+    -- 2. The fights the meter still holds. They carry no times but come in
+    -- order, and so do our reports: a victim's fights pair up one to one with
+    -- our kills of them plus our deaths they fought in (when there are exactly
+    -- that many), or with our kills alone (exactly that many). Otherwise the
+    -- fight a kill belongs to can't be told, and it's skipped.
+    local fights, bySession = Fights(BACKFILL_LOOKBACK)
+    if bySession and #rest > 0 then
+        local wanted, candidate = {}, {}
+        for _, r in ipairs(rest) do wanted[r.victim.guid] = true; candidate[r] = true end
+        local events, kills = {}, {}       -- [guid] = reports, oldest first
+        local function add(t, guid, r)
+            t[guid] = t[guid] or {}
+            local l = t[guid]
+            if l[#l] ~= r then l[#l + 1] = r end
+        end
+        for _, r in ipairs(list) do
+            if not ns.IsFollowUp(r) then
+                if r.kind == "kill" and r.victim and wanted[r.victim.guid] then
+                    add(events, r.victim.guid, r)
+                    add(kills, r.victim.guid, r)
+                elseif r.kind == "death" then
+                    for _, c in ipairs(r.attackers or {}) do
+                        if c.guid and wanted[c.guid] then add(events, c.guid, r) end
+                    end
+                    if r.killer and r.killer.guid and wanted[r.killer.guid] then add(events, r.killer.guid, r) end
+                end
+            end
+        end
+        local cache, fightsOf = {}, {}     -- [guid] = { { fight, session, src } }, oldest first
+        for n = #fights, 1, -1 do
+            local session = FightSession(fights[n], cache)
+            if session then
+                for guid in pairs(wanted) do
+                    local src = VictimSource(session, { guid = guid })
+                    if src then
+                        fightsOf[guid] = fightsOf[guid] or {}
+                        table.insert(fightsOf[guid], { fight = fights[n], session = session, src = src })
+                    end
+                end
+            end
+        end
+        for guid in pairs(wanted) do
+            local fs, evs, ks = fightsOf[guid] or {}, events[guid] or {}, kills[guid] or {}
+            local order = (#fs == #evs and evs) or (#fs == #ks and ks) or nil
+            for n, r in ipairs(order or {}) do
+                local f = fs[n]
+                if candidate[r] and f.fight.breakdown then
+                    local ok, source = pcall(f.fight.breakdown, guid)
+                    local byName = ok and ParseBreakdown(source)
+                    if byName then FollowUp(r, byName, ns.Num(f.src.totalAmount), ns.Num(f.session.durationSeconds)) end
+                end
+            end
+        end
+    end
+    if made > 0 and ns.OnReportsChanged then pcall(ns.OnReportsChanged) end
+    return made
+end
+
+-- One queued scan at a time: the meter's update event can fire many times a
+-- second, and each scan reads every recap the meter lists.
+local scanQueued = false
+local function RunQueuedScan()
+    scanQueued = false
+    pcall(ns.ScanKillmails)
 end
 
 local function ScanSoon(delay)
-    local scan = function() pcall(ns.ScanKillmails) end
-    if C_Timer and C_Timer.After then C_Timer.After(delay, scan) else scan() end
+    if scanQueued then return end
+    scanQueued = true
+    if C_Timer and C_Timer.After then C_Timer.After(delay, RunQueuedScan) else RunQueuedScan() end
+end
+
+-- On modern clients the amount (maybe the action too) is a secret value:
+-- only plain numbers count toward damage taken.
+local function WoundAmount(action, amount)
+    if ns.IsSecret(action) or ns.IsSecret(amount) or action ~= "WOUND" then return 0 end
+    return math.max(0, tonumber(amount) or 0)
 end
 
 -- ---------------------------------------------------------------------------
@@ -828,7 +1308,11 @@ ns.recorderFrame = frame
 function ns.StartRecording()
     frame:RegisterEvent("CHAT_MSG_COMBAT_HONOR_GAIN")
     frame:RegisterEvent("PLAYER_DEAD")
-    frame:RegisterEvent("UNIT_COMBAT")
+    -- Our own damage taken only (registered for every unit, it fires for each
+    -- hit on any nameplate, party member or target).
+    if not pcall(frame.RegisterUnitEvent, frame, "UNIT_COMBAT", "player") then
+        frame:RegisterEvent("UNIT_COMBAT")
+    end
     frame:RegisterEvent("PLAYER_REGEN_DISABLED")
     frame:RegisterEvent("PLAYER_REGEN_ENABLED")
     frame:RegisterEvent("PLAYER_TARGET_CHANGED")
@@ -843,6 +1327,7 @@ function ns.StartRecording()
         C_Timer.NewTicker(20, function() pcall(ns.ScanKillmails) end)
     end
     hkCount = SessionHK()
+    SeedPlates()
 end
 
 local function OnEvent(event, ...)
@@ -853,15 +1338,9 @@ local function OnEvent(event, ...)
         ScanSoon(3)
     elseif event == "UNIT_COMBAT" then
         local unit, action, _, amount = ...
-        local okUnit, isPlayer = pcall(function() return not ns.IsSecret(unit) and unit == "player" end)
-        if okUnit and isPlayer then
+        if ns.Str(unit) == "player" then          -- (other units only if RegisterUnitEvent is missing)
             if ns.Try(UnitAffectingCombat, "player") then fight.since = fight.since or ns.Now() end
-            -- On modern clients the amount (maybe the action too) is a secret
-            -- value: only plain numbers count toward damage taken.
-            local ok, dmg = pcall(function()
-                if ns.IsSecret(action) or ns.IsSecret(amount) or action ~= "WOUND" then return 0 end
-                return math.max(0, tonumber(amount) or 0)
-            end)
+            local ok, dmg = pcall(WoundAmount, action, amount)
             if ok and type(dmg) == "number" then fight.damage = fight.damage + dmg end
             ScanSuspects()
         end
@@ -870,14 +1349,16 @@ local function OnEvent(event, ...)
     elseif event == "UNIT_DIED" then
         OnUnitDied((...))
     elseif event == "DAMAGE_METER_COMBAT_SESSION_UPDATED" then
-        ScanSoon(0.5)
+        -- The meter is secret in combat; leaving combat scans anyway.
+        if not ns.Try(UnitAffectingCombat, "player") then ScanSoon(0.5) end
     elseif event == "PLAYER_ENTERING_WORLD" then
         OnEnterWorld()
+        SeedPlates()
     elseif event == "PLAYER_REGEN_DISABLED" then
         fight.since = fight.since or ns.Now()
         combatStart = ns.Now()
     elseif event == "PLAYER_REGEN_ENABLED" then
-        lastCombat = { start = combatStart, stop = ns.Now() }
+        lastCombat = { start = combatStart, stop = ns.Now(), loc = Location() }
         combatStart = nil
         -- Left combat alive: forget this fight (keep it if we're dead).
         if not ns.Try(UnitIsDeadOrGhost, "player") then ResetFight() end
@@ -887,9 +1368,13 @@ local function OnEvent(event, ...)
     elseif event == "UPDATE_MOUSEOVER_UNIT" then
         ns.Snapshot("mouseover")
     elseif event == "NAME_PLATE_UNIT_ADDED" then
-        ns.Snapshot((...))
+        local unit = ...
+        if type(unit) == "string" then plates[unit] = true end
+        ns.Snapshot(unit)
     elseif event == "NAME_PLATE_UNIT_REMOVED" then
-        OnNameplateRemoved((...))
+        local unit = ...
+        OnNameplateRemoved(unit)
+        if type(unit) == "string" then plates[unit] = nil end
     end
 end
 

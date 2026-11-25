@@ -13,21 +13,31 @@ end
 -- stored. Comparing one raises "attempt to compare a secret number value".
 -- We treat them as unknown.
 local issecret = issecretvalue
+-- Defined once (not as closures per call): these run for nearly every value read.
+local function SelfCompare(v) return v <= v end
+local function Truthy(v) if v then return 1 end return 0 end
+
 function ns.IsSecret(v)
     if v == nil then return false end
     if issecret then
+        -- The client's own answer is authoritative when it has one.
         local ok, secret = pcall(issecret, v)
-        if ok and secret == true then return true end
+        if ok then return secret == true end
     end
     -- Without issecretvalue: a number or string that can't be compared is secret.
     local t = type(v)
     if t == "number" or t == "string" then
-        return not pcall(function() return v <= v end)
+        return not pcall(SelfCompare, v)
     end
     if t == "boolean" then
-        return not pcall(function() if v then return 1 end return 0 end)
+        return not pcall(Truthy, v)
     end
     return false
+end
+
+--- Debug mode (off by default): `/cr debug on`. Saved account-wide.
+function ns.DebugEnabled()
+    return WKillboardDB ~= nil and WKillboardDB.debugMode == true
 end
 
 --- A plain number (nil if missing or secret).
@@ -48,15 +58,22 @@ end
 
 --- pcall a function that may not exist on this client (Forever blocks/omits many APIs).
 --- Secret return values come back as nil.
-local function Pack(...) return { n = select("#", ...), ... } end
+local function CleanResults(ok, ...)
+    if not ok then return nil end
+    local n = select("#", ...)
+    -- Most calls return one or two values: no table needed for those.
+    if n == 1 then return Clean((...)) end
+    if n == 2 then local a, b = ...; return Clean(a), Clean(b) end
+    if n == 0 then return end
+    -- All return values (GetPlayerInfoByGUID has 7), secrets blanked.
+    local r = { ... }
+    for i = 1, n do r[i] = Clean(r[i]) end
+    return unpack(r, 1, n)
+end
 
 function ns.Try(fn, ...)
     if type(fn) ~= "function" then return nil end
-    -- All return values (GetPlayerInfoByGUID has 7), secrets blanked.
-    local r = Pack(pcall(fn, ...))
-    if not r[1] then return nil end
-    for i = 2, r.n do r[i] = Clean(r[i]) end
-    return unpack(r, 2, r.n)
+    return CleanResults(pcall(fn, ...))
 end
 
 function ns.Now()

@@ -15,9 +15,16 @@ local CLASS_ICONS = "Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Class
 
 local MINI_W, MINI_H = WIDTH, 24  -- same width as the window; height = its title bar (measured)
 
+-- The list is virtual: only enough rows to fill the visible area (plus one
+-- for a partly scrolled row) exist, and they're refilled as it scrolls.
+local LIST_TOP, LIST_BOTTOM = 84, 46
+local VIEW_H = HEIGHT - LIST_TOP - LIST_BOTTOM
+local NUM_ROWS = math.ceil(VIEW_H / ROW_H) + 1
+
 local window, mini
 local filter = "all"               -- all | kill | death
-local rows = {}
+local rows = {}                    -- the NUM_ROWS row frames, reused
+local shown = {}                   -- the filtered reports, newest first
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -58,15 +65,39 @@ local function Describe(c)
     return #parts > 0 and table.concat(parts, " ") or nil
 end
 
+-- Other players on each kill, from /cr backfill follow-ups: [kill client_id] = count.
+local followUpAttackers = {}
+
+--- Players who fought on our side of a kill, us included (1 = solo). The
+--- attackers list never holds the reporter; a backfill follow-up can list
+--- party members the kill itself went out without.
+local function FightSize(r)
+    local n = type(r.attackers) == "table" and #r.attackers or 0
+    local extra = r.client_id and followUpAttackers[r.client_id] or 0
+    return 1 + math.max(n, extra)
+end
+ns.FightSize = FightSize
+
 local function Filtered()
     local list = {}
     local reports = WKillboardCharDB.reports
+    local followUps = WKillboardCharDB.followUps or {}
+    followUpAttackers = {}
     for i = #reports, 1, -1 do -- newest first
         local r = reports[i]
-        if filter == "all" or r.kind == filter then list[#list + 1] = r end
+        local of = r.client_id and followUps[r.client_id]
+        if of then
+            -- Backfill follow-ups add damage to a kill already listed.
+            local n = type(r.attackers) == "table" and #r.attackers or 0
+            followUpAttackers[of] = math.max(followUpAttackers[of] or 0, n)
+        elseif filter == "all" or r.kind == filter then
+            list[#list + 1] = r
+        end
     end
     return list
 end
+
+local SOLO_TAG, PARTY_TAG = "|cffE7E9EESolo|r", "|cff6FA3F2Party|r"
 
 -- ---------------------------------------------------------------------------
 -- Row
@@ -88,6 +119,11 @@ local function ShowTooltip(row)
     GameTooltip:AddLine(" ")
     GameTooltip:AddDoubleLine("Zone", r.subzone and (r.zone .. ", " .. r.subzone) or r.zone, 0.54, 0.56, 0.61, 1, 1, 1)
     GameTooltip:AddDoubleLine("Time", date("%b %d %H:%M", r.occurred_at), 0.54, 0.56, 0.61, 1, 1, 1)
+    if r.kind == "kill" then
+        local size = FightSize(r)
+        GameTooltip:AddDoubleLine("Fight", size > 1 and ("Party kill, " .. size .. " players") or "Solo kill",
+            0.54, 0.56, 0.61, 1, 1, 1)
+    end
     if r.honor then GameTooltip:AddDoubleLine("Honor", "+" .. r.honor, 0.54, 0.56, 0.61, 0.95, 0.76, 0.31) end
     if r.damage_taken then
         local d = tostring(r.damage_taken) .. (r.duration_sec and r.duration_sec > 0 and (" in " .. r.duration_sec .. "s") or "")
@@ -111,21 +147,21 @@ local function ShowTooltip(row)
     GameTooltip:AddLine(" ")
     if r.exported_at then
         GameTooltip:AddLine("Exported " .. RelTime(r.exported_at) .. " ago", 0.54, 0.56, 0.61)
+    elseif ns.AwaitingDetails and ns.AwaitingDetails(r) and ns.Try(UnitAffectingCombat, "player") then
+        GameTooltip:AddLine("Waiting for its details: exportable after combat", 0.95, 0.76, 0.31)
     else
         GameTooltip:AddLine("Waiting to export", 0.95, 0.76, 0.31)
     end
     GameTooltip:Show()
 end
 
-local function CreateRow(parent, index)
+local function CreateRow(parent)
     local row = CreateFrame("Button", nil, parent)
     row:SetSize(LIST_W, ROW_H)
-    row:SetPoint("TOPLEFT", 0, -(index - 1) * ROW_H)
     row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
 
     row.stripe = row:CreateTexture(nil, "BACKGROUND")
     row.stripe:SetAllPoints()
-    SetSolid(row.stripe, 1, 1, 1, index % 2 == 0 and 0.03 or 0)
 
     row.icon = row:CreateTexture(nil, "ARTWORK")
     row.icon:SetSize(28, 28)
@@ -140,11 +176,16 @@ local function CreateRow(parent, index)
     row.name:SetPoint("LEFT", row.tag, "RIGHT", 2, 0)
     row.name:SetWidth(170)
     row.name:SetJustifyH("LEFT")
+    row.name:SetWordWrap(false)
 
     row.sub = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     row.sub:SetPoint("BOTTOMLEFT", row.icon, "BOTTOMRIGHT", 8, 1)
-    row.sub:SetWidth(250)
+    -- One line, cut off with "..." before the time column (wrapping would
+    -- run it up into the name).
+    row.sub:SetWidth(LIST_W - 42 - 64)
     row.sub:SetJustifyH("LEFT")
+    row.sub:SetWordWrap(false)
+    if row.sub.SetMaxLines then row.sub:SetMaxLines(1) end
 
     row.honor = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     row.honor:SetPoint("TOPRIGHT", -30, -5)
@@ -160,6 +201,7 @@ local function CreateRow(parent, index)
 
     row:SetScript("OnEnter", ShowTooltip)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    row:Hide()
     return row
 end
 
@@ -191,7 +233,12 @@ local function FillRow(row, r)
     row.name:SetText(ClassColor(o and o.class) .. name .. "|r" .. factionTag)
 
     local desc = Describe(o)
-    row.sub:SetText((desc and (desc .. " · ") or "") .. (r.subzone or r.zone or ""))
+    local fight = ""
+    if r.kind == "kill" then
+        local size = FightSize(r)
+        fight = (size > 1 and (PARTY_TAG .. DIM .. " " .. size .. "|r") or SOLO_TAG) .. " · "
+    end
+    row.sub:SetText(fight .. (desc and (desc .. " · ") or "") .. (r.subzone or r.zone or ""))
 
     row.honor:SetText(r.honor and (GOLD .. "+" .. r.honor .. "|r") or "")
     row.time:SetText(RelTime(r.occurred_at))
@@ -202,6 +249,30 @@ local function FillRow(row, r)
         row.status:SetTexture("Interface\\COMMON\\Indicator-Yellow")
     end
     row:Show()
+end
+
+--- Put the row frames over the reports in view at the current scroll offset.
+local function LayoutRows()
+    if not window then return end
+    local offset = window.scroll:GetVerticalScroll() or 0
+    local first = math.max(0, math.floor(offset / ROW_H))
+    for i, row in ipairs(rows) do
+        local index = first + i
+        local r = shown[index]
+        if r then
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", 0, -(index - 1) * ROW_H)
+            SetSolid(row.stripe, 1, 1, 1, index % 2 == 0 and 0.03 or 0)
+            FillRow(row, r)
+        else
+            row:Hide()
+            row.report = nil
+        end
+        -- The row under the mouse may now show another report.
+        if GameTooltip:IsOwned(row) then
+            if r then ShowTooltip(row) else GameTooltip:Hide() end
+        end
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -227,24 +298,30 @@ function ns.RefreshWindow()
     if not window or not window:IsShown() then return end
     local kills, deaths, exported = 0, 0, 0
     for _, r in ipairs(WKillboardCharDB.reports) do
-        if r.kind == "kill" then kills = kills + 1 else deaths = deaths + 1 end
+        if ns.IsFollowUp and ns.IsFollowUp(r) then
+            -- counted under its kill
+        elseif r.kind == "kill" then kills = kills + 1 else deaths = deaths + 1 end
         if r.exported_at then exported = exported + 1 end
     end
     local pending = ns.PendingCount()
-    window.summary:SetText(string.format("%sKills|r %d   %sLosses|r %d   %s%d waiting to export|r",
-        KILL_COLOR, kills, LOSS_COLOR, deaths, pending > 0 and GOLD or DIM, pending))
+    -- In combat, kills still waiting for their details aren't exportable yet.
+    local ready, held = pending, 0
+    if ns.ExportStatus then ready, held = ns.ExportStatus() end
+    window.summary:SetText(string.format("%sKills|r %d   %sLosses|r %d   %s%d waiting to export|r%s",
+        KILL_COLOR, kills, LOSS_COLOR, deaths, pending > 0 and GOLD or DIM, pending,
+        held > 0 and string.format(" %s(%d after combat)|r", DIM, held) or ""))
 
-    local list = Filtered()
-    for i, r in ipairs(list) do
-        rows[i] = rows[i] or CreateRow(window.content, i)
-        FillRow(rows[i], r)
-    end
-    for i = #list + 1, #rows do rows[i]:Hide(); rows[i].report = nil end
-    window.content:SetHeight(math.max(1, #list * ROW_H))
-    window.empty:SetShown(#list == 0)
+    shown = Filtered()
+    local height = #shown * ROW_H
+    window.content:SetHeight(math.max(1, height))
+    -- The list got shorter (cleared, filtered): don't stay scrolled past its end.
+    local maxOffset = math.max(0, height - (window.scroll:GetHeight() or VIEW_H))
+    if (window.scroll:GetVerticalScroll() or 0) > maxOffset then window.scroll:SetVerticalScroll(maxOffset) end
+    LayoutRows()
+    window.empty:SetShown(#shown == 0)
 
-    window.exportNew:SetText(pending > 0 and string.format("Export new (%d)", pending) or "Export new")
-    window.exportNew:SetEnabled(pending > 0)
+    window.exportNew:SetText(ready > 0 and string.format("Export new (%d)", ready) or "Export new")
+    window.exportNew:SetEnabled(ready > 0)
     window.clear:SetEnabled(exported > 0)
     UpdateFilterButtons()
 end
@@ -492,6 +569,7 @@ function CreateWindow()
         b:SetText(def[2])
         b:SetScript("OnClick", function()
             filter = def[1]
+            f.scroll:SetVerticalScroll(0)
             ns.RefreshWindow()
         end)
         f.filters[def[1]] = b
@@ -516,11 +594,17 @@ function CreateWindow()
 
     -- List
     local scroll = CreateFrame("ScrollFrame", "CorpseRunWindowScroll", f, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT", 12, -84)
-    scroll:SetPoint("BOTTOMRIGHT", -32, 46)
+    scroll:SetPoint("TOPLEFT", 12, -LIST_TOP)
+    scroll:SetPoint("BOTTOMRIGHT", -32, LIST_BOTTOM)
+    f.scroll = scroll
     f.content = CreateFrame("Frame", nil, scroll)
     f.content:SetSize(LIST_W, 1)
     scroll:SetScrollChild(f.content)
+    for i = 1, NUM_ROWS do rows[i] = CreateRow(f.content) end
+    -- Refill the rows whenever the offset moves (drag, wheel, arrows).
+    scroll:HookScript("OnVerticalScroll", LayoutRows)
+    local bar = scroll.ScrollBar or _G["CorpseRunWindowScrollScrollBar"]
+    if type(bar) == "table" and bar.HookScript then bar:HookScript("OnValueChanged", LayoutRows) end
 
     f.empty = f:CreateFontString(nil, "OVERLAY", "GameFontDisable")
     f.empty:SetPoint("CENTER", scroll, "CENTER", 0, 10)
