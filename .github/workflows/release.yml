@@ -1,7 +1,10 @@
 name: Package and release
 
 # Runs when a tag is pushed, e.g. `git tag 0.4.2 && git push origin 0.4.2`.
-# Tags containing "alpha" or "beta" are uploaded as alpha/beta builds.
+# Packages the addon and uploads it to CurseForge and to a GitHub release for
+# the tag (CorpseRun-<tag>.zip, with the changelog as release notes).
+# Tags containing "alpha" or "beta" are uploaded as alpha/beta builds (a GitHub
+# pre-release).
 on:
   push:
     tags:
@@ -10,8 +13,11 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release and upload the zip
     env:
       CF_API_KEY: ${{ secrets.CF_API_KEY }}
+      GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
