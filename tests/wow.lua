@@ -136,6 +136,7 @@ function T.boot(opts)
     local toc = opts.toc or 16001
     GetBuildInfo = function() return "1.60.1", "70959", "Nov 2026", toc end
     GetRealmName = function() return "Realm" end
+    C_Spell = { GetSpellName = function(id) return ({ [331] = "Healing Wave", [8004] = "Lesser Healing Wave" })[id] end }
     C_DeathRecap = { GetRecapEvents = function(id) if id then return T.recaps[id] end return T.recap end }
     T.meterSessions = nil    -- the meter's kept fights: { { id, enemy = session, victims = { [guid] = breakdown } } }
     local function fightById(id)
@@ -149,10 +150,13 @@ function T.boot(opts)
         if T.inCombat then return T.SECRET end
         local f = fightById(id)
         if f and meterType == 10 then return f.enemy end
+        if f and meterType == 2 then return f.heals end      -- HealingDone
+        if f and meterType == 4 then return f.absorbs end    -- Absorbs
     end, GetCombatSessionSourceFromID = function(id, meterType, guid)
         if T.inCombat then return T.SECRET end
         local f = fightById(id)
         if f and meterType == 10 then return f.victims and f.victims[guid] end
+        if f and meterType == 2 then return f.healSpells and f.healSpells[guid] end
     end, GetCombatSessionSourceFromType = function(sessionType, meterType, guid)
         if T.inCombat then return T.SECRET end
         if sessionType == 1 and meterType == 10 then return T.meterVictim[guid] end

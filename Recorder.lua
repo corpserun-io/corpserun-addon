@@ -1049,6 +1049,8 @@ local function Fights(lookback)
                 key = id,
                 session = function() return C_DamageMeter.GetCombatSessionFromID(id, ENEMY_DAMAGE) end,
                 breakdown = bySource and function(guid) return bySource(id, ENEMY_DAMAGE, guid) end,
+                meter = function(meterType) return C_DamageMeter.GetCombatSessionFromID(id, meterType) end,
+                source = bySource and function(meterType, guid) return bySource(id, meterType, guid) end,
             }
         end
         if #fights > 0 then return fights, true end
@@ -1058,6 +1060,8 @@ local function Fights(lookback)
         key = "current",
         session = function() return C_DamageMeter.GetCombatSessionFromType(1, ENEMY_DAMAGE) end,
         breakdown = byType and function(guid) return byType(1, ENEMY_DAMAGE, guid) end,
+        meter = function(meterType) return C_DamageMeter.GetCombatSessionFromType(1, meterType) end,
+        source = byType and function(meterType, guid) return byType(1, meterType, guid) end,
     }
     return fights, false
 end
@@ -1106,17 +1110,18 @@ local function MatchFights(kills, fights, found)
     end
 end
 
+--- When kills can still be matched to the meter's fights: with kept fights,
+--- the last FILL_WINDOW; otherwise only kills made during the last fight.
+local function FillWindow(bySession)
+    if bySession then return ns.Now() - FILL_WINDOW, math.huge end
+    if not lastCombat then return nil end
+    return (lastCombat.start or (lastCombat.stop - 120)) - 5, lastCombat.stop + 5
+end
+
 local function FillFromMeter()
     local fights, bySession = Fights()
-    local from, to
-    if bySession then
-        from, to = ns.Now() - FILL_WINDOW, math.huge
-    else
-        -- Only the current fight is readable: only kills made during it.
-        if not lastCombat then return end
-        from = (lastCombat.start or (lastCombat.stop - 120)) - 5
-        to = lastCombat.stop + 5
-    end
+    local from, to = FillWindow(bySession)
+    if not from then return end
     local pending, index = {}, {}
     for i, r in ipairs(Reports()) do
         if r.kind == "kill" and r.victim and not r.exported_at and not r.meter_damage and not r.damage_taken
@@ -1157,6 +1162,111 @@ local function FillFromMeter()
         -- them, whose `prev` changes) again, or the export sends the old copy.
         if Unsign(firstChanged) and ns.SignReports then pcall(ns.SignReports) end
         if ns.DebugEnabled() then pcall(ns.Debug, "meter_fill", { filled = filled, bySession = bySession }) end
+        if ns.OnReportsChanged then ns.OnReportsChanged() end
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Healing: the meter's Healing Done and Absorbs lists for the fight a kill
+-- happened in. They cover the whole fight (not one kill) and only our group
+-- (us included), so a kill's healers are the group members who healed in it.
+-- ---------------------------------------------------------------------------
+
+local METER_ENUM = Enum and Enum.DamageMeterType
+local HEALING = (METER_ENUM and METER_ENUM.HealingDone) or 2
+local ABSORBS = (METER_ENUM and METER_ENUM.Absorbs) or 4
+local MAX_HEALERS = 15
+local healChecked = setmetatable({}, { __mode = "k" })   -- kills already given their fight's healing
+
+--- A fight's list for one meter type: [lower first name] = { amount, guid },
+--- or nil when the client doesn't give that list.
+local function FightTotals(fight, meterType)
+    if not fight.meter then return nil end
+    local ok, session = pcall(fight.meter, meterType)
+    if not ok or type(session) ~= "table" or ns.IsSecret(session) or type(session.combatSources) ~= "table" then return nil end
+    local out = {}
+    for _, src in ipairs(session.combatSources) do
+        local name = src.isLocalPlayer == true and ns.ShortName(ns.Try(UnitName, "player")) or ns.SplitName(ns.Str(src.name))
+        local amount = ns.Num(src.totalAmount)
+        if name and amount and amount > 0 then
+            local key = name:lower()
+            local e = out[key] or { amount = 0, guid = ns.Str(src.sourceGUID) }
+            e.amount = e.amount + amount
+            out[key] = e
+        end
+    end
+    return out
+end
+
+--- A healer's biggest heal this fight, from the meter's per-spell list.
+local function TopHeal(fight, guid)
+    if not (fight.source and guid) then return nil end
+    local ok, source = pcall(fight.source, HEALING, guid)
+    if not ok or type(source) ~= "table" or ns.IsSecret(source) then return nil end
+    local spells = source.combatSpells or source.spells
+    if type(spells) ~= "table" then return nil end
+    local top, best = nil, 0
+    for _, spell in ipairs(spells) do
+        local id = type(spell) == "table" and ns.Num(spell.spellID)
+        local amount = type(spell) == "table" and ns.Num(spell.totalAmount)
+        if id and id > 0 and amount and amount > best then top, best = id, amount end
+    end
+    return SpellName(top)
+end
+
+--- Our group's healing in a fight (us included): Characters with healing,
+--- absorbs and top heal, most first. nil when the meter has no healing lists.
+local function GroupHealing(fight)
+    local heals, absorbs = FightTotals(fight, HEALING), FightTotals(fight, ABSORBS)
+    if ns.DebugEnabled() then pcall(ns.Debug, "meter_healing", { fight = tostring(fight.key), heals = heals, absorbs = absorbs }, 4) end
+    if not heals and not absorbs then return nil end
+    heals, absorbs = heals or {}, absorbs or {}
+    local units = GroupUnits()
+    table.insert(units, 1, "player")
+    local out = {}
+    for _, unit in ipairs(units) do
+        local key = (ns.ShortName(ns.Try(UnitName, unit)) or ""):lower()
+        local h, a = heals[key], absorbs[key]
+        local info = (h or a) and ns.CharInfo(unit)
+        if info then
+            info.healing = h and math.floor(h.amount + 0.5) or nil
+            info.absorbs = a and math.floor(a.amount + 0.5) or nil
+            info.top_ability = h and TopHeal(fight, h.guid or info.guid) or nil
+            out[#out + 1] = info
+        end
+    end
+    local function total(c) return (c.healing or 0) + (c.absorbs or 0) end
+    table.sort(out, function(x, y) return total(x) > total(y) end)
+    for i = #out, MAX_HEALERS + 1, -1 do out[i] = nil end
+    return out
+end
+
+--- Kills not exported yet get the healing of the fight they happened in.
+local function FillHealing()
+    local fights, bySession = Fights()
+    local from, to = FillWindow(bySession)
+    if not from then return end
+    local pending, index = {}, {}
+    for i, r in ipairs(Reports()) do
+        if r.kind == "kill" and r.victim and not r.exported_at and not r.healers and not healChecked[r]
+            and (r.occurred_at or 0) >= from and (r.occurred_at or 0) <= to then
+            pending[#pending + 1] = r
+            index[r] = i
+        end
+    end
+    if #pending == 0 then return end
+    table.sort(pending, function(a, b) return index[a] > index[b] end)
+    local firstChanged
+    MatchFights(pending, fights, function(r, fight)
+        healChecked[r] = true
+        local healers = GroupHealing(fight)
+        if healers and #healers > 0 then
+            r.healers = healers
+            if not firstChanged or index[r] < firstChanged then firstChanged = index[r] end
+        end
+    end)
+    if firstChanged then
+        if Unsign(firstChanged) and ns.SignReports then pcall(ns.SignReports) end
         if ns.OnReportsChanged then ns.OnReportsChanged() end
     end
 end
@@ -1207,6 +1317,7 @@ function ns.ScanKillmails(force)
     end
     -- Then open-world kills the killmails didn't cover.
     pcall(FillFromMeter)
+    pcall(FillHealing)
     -- Every kill recorded before this scan has had its chance at details:
     -- they're ready to export.
     if next(awaiting) then

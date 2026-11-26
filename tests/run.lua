@@ -450,6 +450,42 @@ test("back-to-back fights: each kill gets its own fight's details from the meter
     assert(m.meter_damage == 900 and #m.attackers == 1 and m.attackers[1].name == "Jaina", "second fight's kill")
 end)
 
+test("healing: the group's Healing Done and Absorbs for the kill's fight become its healers (us included)", function()
+    local ns = T.boot()
+    SlashCmdList.CORPSERUN("key wkb_" .. string.rep("ab", 32))
+    Party()
+    T.units.target = T.enemy("Valeria", nil, { dead = true })
+    T.clock = 10; T.hk = 1; T.fire("PLAYER_PVP_KILLS_CHANGED")
+    local f = Fight(7, "Valeria", "Player-9-Valeria", 800, { { "Thrall Doe", 600 }, { "Gorvash", 200 } })
+    f.heals = { durationSeconds = 25, combatSources = {
+        { name = "Thrall Doe", sourceGUID = "Player-1-0002", totalAmount = 2400 },
+        { name = "Gorvash", sourceGUID = "Player-1-0001", totalAmount = 120, isLocalPlayer = true },
+        { name = "Stranger", sourceGUID = "Player-5-0001", totalAmount = 9000 },     -- not in our group
+    } }
+    f.absorbs = { combatSources = { { name = "Jaina", sourceGUID = "Player-1-0003", totalAmount = 300 } } }
+    f.healSpells = { ["Player-1-0002"] = { combatSpells = {
+        { spellID = 331, totalAmount = 400 }, { spellID = 8004, totalAmount = 2000 },
+    } } }
+    T.meterSessions = { f }
+    T.inCombat = false
+    T.clock = 40; T.fire("PLAYER_REGEN_ENABLED")
+    local r = T.last()
+    assert(r.healers and #r.healers == 3, "healers: " .. (r.healers and #r.healers or 0))
+    local h = r.healers
+    assert(h[1].name == "Thrall" and h[1].surname == "Doe" and h[1].healing == 2400 and h[1].top_ability == "Lesser Healing Wave", "Thrall heals most: " .. tostring(h[1].top_ability))
+    assert(h[2].name == "Jaina" and h[2].absorbs == 300 and h[2].healing == nil, "Jaina's shields")
+    assert(h[3].name == "Gorvash" and h[3].healing == 120, "our own healing")
+    assert(ns.SignedJSON(r):find('"healing":2400', 1, true), "signed again with the healers")
+    -- A fight without healing lists leaves the kill alone.
+    T.boot()
+    T.units.target = T.enemy("Mira", nil, { dead = true })
+    T.clock = 10; T.hk = 1; T.fire("PLAYER_PVP_KILLS_CHANGED")
+    T.meterSessions = { Fight(8, "Mira", "Player-9-Mira", 900, {}) }
+    T.inCombat = false
+    T.clock = 40; T.fire("PLAYER_REGEN_ENABLED")
+    assert(T.last().healers == nil, "no healers")
+end)
+
 test("/cr backfill: the meter's kept fights fill exported kills, only when kills and fights pair up", function()
     local ns = T.boot()
     SlashCmdList.CORPSERUN("key wkb_" .. string.rep("ab", 32))

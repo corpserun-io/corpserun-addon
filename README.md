@@ -33,7 +33,7 @@ Anniversary, Progression Classic and Retail, in battlegrounds and world PvP.
 
    | Setting | What CorpseRun reads from it |
    | --- | --- |
-   | Damage meter | Final blows, attackers and everyone's damage |
+   | Damage meter | Final blows, attackers, everyone's damage and your group's healing |
    | Enemy nameplates (key `V`) | Who attacked you, and which enemy died |
    | Friendly nameplates | Players outside your group who helped on a kill |
 

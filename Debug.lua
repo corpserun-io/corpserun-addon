@@ -103,9 +103,10 @@ local function Statistics()
     return out
 end
 
--- Enum.DamageMeterType: 0 DamageDone, 7 DamageTaken, 9 Deaths, 10 EnemyDamageTaken.
+-- Enum.DamageMeterType: 0 DamageDone, 2 HealingDone, 4 Absorbs, 7 DamageTaken,
+-- 9 Deaths, 10 EnemyDamageTaken.
 -- Enum.DamageMeterSessionType: 0 Overall, 1 Current, 2 Expired.
-local METER_TYPES = { 10, 9, 0 }
+local METER_TYPES = { 10, 9, 0, 2, 4 }
 
 --- The built-in damage meter's sessions (secret during combat; read after).
 --- For each source: its per-spell breakdown, and for deaths, the recap.
