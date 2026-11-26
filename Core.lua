@@ -17,7 +17,8 @@ end
 local loader = CreateFrame("Frame")
 loader:RegisterEvent("ADDON_LOADED")
 loader:RegisterEvent("PLAYER_LOGIN")
-loader:SetScript("OnEvent", function(self, event, arg1)
+loader:RegisterEvent("PLAYER_ENTERING_WORLD")
+loader:SetScript("OnEvent", function(self, event, arg1, arg2)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
         WKillboardDB = WKillboardDB or {}
         WKillboardCharDB = WKillboardCharDB or {}
@@ -60,27 +61,25 @@ loader:SetScript("OnEvent", function(self, event, arg1)
         else
             ns.Print("Loaded. Kills and deaths are recorded automatically. |cffffffff/cr|r for options.")
         end
-        ns.CheckSettings(true)
         ns.RestoreWindow()
         ns.SetupMinimapButton()
-    elseif event == "CVAR_UPDATE" then
-        local name = type(arg1) == "string" and arg1:lower() or ""
-        if name == "damagemeterenabled" or name == "nameplateshowenemies" or name == "nameplateshowfriends"
-            or name == "nameplateshowfriendlyplayers" then
-            ns.CheckSettings(false)
-        end
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Settings warning: once per game session. The first time the world
+        -- loads after logging in, never after a /reload (arg2 = isReloadingUi)
+        -- or a loading screen.
+        self:UnregisterEvent("PLAYER_ENTERING_WORLD")
+        if arg2 ~= true then ns.CheckSettings() end
     end
 end)
-loader:RegisterEvent("CVAR_UPDATE")
 
--- Game settings CorpseRun reads from. If a player turned one off, say so: all
--- of them in one message at login, then again only when one is switched off.
--- Never switch them on for the player (the meter would pop its window up).
+-- Game settings CorpseRun reads from. If a player turned one off, say so once
+-- per session. Never switch them on for the player (the meter would pop its
+-- window up).
 local SETTINGS = {
     { cvar = "damageMeterEnabled", name = "the damage meter", why = "final blows, attackers and damage" },
-    { cvar = "nameplateShowEnemies", name = "enemy nameplates", why = "who attacked you and which enemy died", key = "V" },
+    { cvar = "nameplateShowEnemies", name = "enemy nameplates", plural = true, why = "who attacked you and which enemy died", key = "V" },
     -- Forever (modern engine) has nameplateShowFriendlyPlayers; older clients nameplateShowFriends.
-    { cvar = "nameplateShowFriends", also = "nameplateShowFriendlyPlayers", name = "friendly nameplates",
+    { cvar = "nameplateShowFriends", also = "nameplateShowFriendlyPlayers", name = "friendly nameplates", plural = true,
       why = "players outside your group who helped on a kill" },
 }
 
@@ -108,43 +107,32 @@ local function SettingOff(s)
     return CVarOff(s.cvar)
 end
 
-local function Describe(s)
-    return string.format("|cffffffff%s|r (%s%s)", s.name, s.why, s.key and (", key " .. s.key) or "")
+--- "A", "A and B", "A, B and C".
+local function JoinAnd(list)
+    if #list == 1 then return list[1] end
+    return table.concat(list, ", ", 1, #list - 1) .. " and " .. list[#list]
 end
 
-local lastOff = {}                            -- [cvar] = was off at the last check
-local warnedAny = false
-
---- Prints which settings are off. login: everything that's off (once per
---- session); otherwise only settings switched off since the last check, and
---- a thank-you once everything warned about is back on.
-function ns.CheckSettings(login)
-    local off, newlyOff = {}, {}
+--- Prints which settings are off, if any, and returns them.
+function ns.CheckSettings()
+    local off, names = {}, {}
     for _, s in ipairs(SETTINGS) do
-        local isOff = SettingOff(s)
-        if isOff then off[#off + 1] = s end
-        if isOff and not lastOff[s.cvar] then newlyOff[#newlyOff + 1] = s end
-        lastOff[s.cvar] = isOff
+        if SettingOff(s) then off[#off + 1] = s; names[#names + 1] = s.name end
     end
-    local list = login and off or newlyOff
-    if #list > 0 then
-        local parts = {}
-        for i, s in ipairs(list) do parts[i] = Describe(s) end
-        ns.Print("Turned off: %s. CorpseRun reads %s to record kills fully. Turn %s on in the game's Options.",
-            table.concat(parts, "; "), #list == 1 and "it" or "them", #list == 1 and "it" or "them")
-        warnedAny = true
-    elseif warnedAny and #off == 0 and not login then
-        warnedAny = false
-        ns.Print("Thanks: the damage meter and nameplates are all on.")
+    if #off > 0 then
+        local text = JoinAnd(names)
+        ns.Print("%s%s %s off. Please turn %s on in the game's Options to collect all data. |cffffffff/cr check|r for details.",
+            text:sub(1, 1):upper(), text:sub(2), (#off > 1 or off[1].plural) and "are" or "is",
+            (#off > 1 or off[1].plural) and "them" or "it")
     end
     return off
 end
-ns.CheckDamageMeter = function() ns.CheckSettings(true) end
 
 --- /cr check: every setting and whether it's on.
 function ns.SettingsStatus()
     for _, s in ipairs(SETTINGS) do
-        ns.Print("%s %s: %s", SettingOff(s) and "|cffff5555off|r" or "|cff4ade80on|r", s.name, s.why)
+        ns.Print("%s %s: %s%s", SettingOff(s) and "|cffff5555off|r" or "|cff4ade80on|r", s.name, s.why,
+            s.key and (" (key " .. s.key .. ")") or "")
     end
 end
 

@@ -694,34 +694,38 @@ test("/cr clear all asks first when unexported reports would be lost", function(
     assert(#T.reports() == 0 and T.said("Deleted 1 report."), "second time deletes")
 end)
 
-test("settings: damage meter and nameplates off are named at login, again only when switched off", function()
+test("settings: what's off is named once per game session, never again after a /reload or a change", function()
     local function count(text)
         local n = 0
         for _, l in ipairs(T.printed) do if l:find(text, 1, true) then n = n + 1 end end
         return n
     end
-    T.boot({ cvars = { damageMeterEnabled = "0", nameplateShowEnemies = "1", nameplateShowFriends = "0" } })
-    assert(count("Turned off:") == 1 and T.said("the damage meter") and T.said("friendly nameplates"), "one message at login")
-    assert(not T.said("enemy nameplates"), "enemy nameplates are on")
-    T.fire("CVAR_UPDATE", "damageMeterEnabled", "0")
-    assert(count("Turned off:") == 1, "not repeated while nothing changed")
+    T.boot({ cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriends = "0" } })
+    assert(T.said("Friendly nameplates are off. Please turn them on in the game's Options to collect all data."),
+        "friendly nameplates off at login")
+    assert(count(" off. Please turn") == 1, "one message")
     T.cvars.nameplateShowEnemies = "0"
     T.fire("CVAR_UPDATE", "nameplateShowEnemies", "0")
-    assert(count("Turned off:") == 2 and T.said("enemy nameplates"), "switched off: warned")
-    T.cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriends = "1" }
-    T.fire("CVAR_UPDATE", "nameplateShowFriends", "1")
-    assert(T.said("all on"), "thanks once everything is back on")
+    T.fire("PLAYER_ENTERING_WORLD", false, false)           -- loading screen
+    assert(count(" off. Please turn") == 1, "not repeated in the same session")
+    -- A /reload restarts the addon: still no repeat.
+    T.boot({ reload = true, cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriends = "0" } })
+    assert(not T.said("off. Please turn"), "not repeated after a /reload")
+    T.boot({ cvars = { damageMeterEnabled = "0", nameplateShowEnemies = "0", nameplateShowFriends = "0" } })
+    assert(T.said("The damage meter, enemy nameplates and friendly nameplates are off. Please turn them on"), "all three in one line")
+    T.boot({ cvars = { damageMeterEnabled = "0", nameplateShowEnemies = "1", nameplateShowFriends = "1" } })
+    assert(T.said("The damage meter is off. Please turn it on"), "one setting, singular")
     SlashCmdList.CORPSERUN("check")
-    assert(T.said("on|r friendly nameplates"), "/cr check lists them")
+    assert(T.said("on|r friendly nameplates") and T.said("(key V)"), "/cr check lists them")
     T.boot({ cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriends = "1" } })
-    assert(not T.said("Turned off:"), "no warning when all are on")
+    assert(not T.said(" off."), "no warning when all are on")
     T.boot()
     assert(not T.said("nameplates"), "unknown settings count as on")
     -- Forever: friendly players' nameplates have their own setting.
     T.boot({ cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriends = "0", nameplateShowFriendlyPlayers = "1" } })
-    assert(not T.said("Turned off:"), "friendly player nameplates on counts")
+    assert(not T.said(" off."), "friendly player nameplates on counts")
     T.boot({ cvars = { damageMeterEnabled = "1", nameplateShowEnemies = "1", nameplateShowFriendlyPlayers = "0" } })
-    assert(T.said("friendly nameplates"), "only the Forever setting, off")
+    assert(T.said("Friendly nameplates are off"), "only the Forever setting, off")
 end)
 
 local function ListeningToAll()

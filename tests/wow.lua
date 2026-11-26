@@ -190,7 +190,8 @@ function T.boot(opts)
     end
     T.fire("ADDON_LOADED", "CorpseRun")
     T.fire("PLAYER_LOGIN")
-    T.fire("PLAYER_ENTERING_WORLD")
+    -- isInitialLogin, isReloadingUi (opts.reload: a /reload)
+    T.fire("PLAYER_ENTERING_WORLD", not opts.reload, opts.reload == true)
     return ns
 end
 
